@@ -284,31 +284,26 @@ def _cache_seg_features(name, enc, dataset, dev, tag, bs=128):
     return feats, labels
 
 
-def _eval_seg_miou(linear, feats, labels, num_classes, dev, bs=256):
-    """Train linear head is already done; evaluate mIoU on held-out features."""
+def _eval_seg_miou(linear, feats, labels, mean, std, num_classes, dev, bs=128):
+    """Evaluate mIoU, upsampling per-class logits to the GT resolution and
+    argmax-ing there (standard linear-seg eval)."""
     linear.eval()
     cm = torch.zeros(num_classes, num_classes, dtype=torch.long)
     n = feats.shape[0]
     with torch.no_grad():
         for s in range(0, n, bs):
-            f = feats[s:s + bs].to(dev)  # (b,196,D)
+            f = ((feats[s:s + bs] - mean) / std).to(dev)  # (b,196,D)
             lab = [labels[i] for i in range(s, min(s + bs, n))]
-            logits = linear(f)  # (b,196,C)
-            b = logits.shape[0]
-            logits = logits.view(b, num_classes, 14, 14)
-            preds = logits.argmax(1)  # (b,14,14)
-            for j in range(b):
+            logits = linear(f).view(-1, num_classes, 14, 14)
+            for j in range(logits.shape[0]):
                 gt = lab[j]  # CPU (H,W)
                 gh, gw = gt.shape
-                pred = F.interpolate(
-                    preds[j:j + 1].unsqueeze(1).float(),
-                    size=(gh, gw),
-                    mode="bilinear",
-                    align_corners=False,
-                )[0, 0].round().long().cpu()
+                up = F.interpolate(
+                    logits[j:j + 1], size=(gh, gw), mode="bilinear", align_corners=False
+                )[0].argmax(0).cpu()  # (gh,gw)
                 g = gt
                 valid = g != 255
-                p = pred[valid].to(torch.long)
+                p = up[valid].to(torch.long)
                 g = g[valid].to(torch.long)
                 cm += torch.bincount(
                     p * num_classes + g, minlength=num_classes * num_classes
@@ -333,21 +328,36 @@ def _downsample_labels(labels, num_classes):
     return torch.stack(out, 0)  # (N,14,14)
 
 
-def train_linear_seg(name, enc, dev, seg_epochs=30, seg_lr=1e-3, seg_bs=64):
+def train_linear_seg(name, enc, dev, seg_epochs=20, seg_lr=0.1, seg_bs=256):
     train_split, val_split, num_classes, void, one_idx = _load_ade20k()
     train_ds = ADESegDataset(train_split, seg_transform(), num_classes, void, one_idx)
     val_ds = ADESegDataset(val_split, seg_transform(), num_classes, void, one_idx)
     D = enc.embed_dim if name == "levljepa" else enc.config.hidden_size
-    train_feats, train_labels = _cache_seg_features(
-        name, enc, train_ds, dev, "train"
-    )
+    train_feats, train_labels = _cache_seg_features(name, enc, train_ds, dev, "train")
     val_feats, val_labels = _cache_seg_features(name, enc, val_ds, dev, "val")
 
-    linear = nn.Linear(D, num_classes, bias=False).to(dev)
-    opt = torch.optim.AdamW(linear.parameters(), lr=seg_lr, weight_decay=0.0)
-    loss_fn = nn.CrossEntropyLoss(ignore_index=255)
+    # Per-dim standardization over all train patch tokens (helps the linear
+    # head separate spatially; raw LayerNorm'd features can otherwise collapse
+    # to a constant prediction under SGD/AdamW).
+    flat = train_feats.reshape(-1, D)
+    mean = flat.mean(0)
+    std = flat.std(0).clamp(min=1e-8)
     train_lab14 = _downsample_labels(train_labels, num_classes).pin_memory()
     n = train_feats.shape[0]
+    # Sanity: report label non-void fraction + feature stats.
+    nv = (train_lab14 != 255).float().mean().item()
+    print(
+        f"[seg] {name} feat{tuple(train_feats.shape)} mean={flat.mean().item():.3f} "
+        f"std={flat.std().item():.3f} label_nonvoid={nv:.3f} cls_present="
+        f"{(train_lab14.view(-1).bincount(minlength=num_classes) > 0).sum().item()}",
+        flush=True,
+    )
+
+    linear = nn.Linear(D, num_classes, bias=False).to(dev)
+    opt = torch.optim.SGD(linear.parameters(), lr=seg_lr, momentum=0.9,
+                          weight_decay=1e-4)
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=seg_epochs)
+    loss_fn = nn.CrossEntropyLoss(ignore_index=255)
     idx = torch.arange(n)
     rng = random.Random(0)
     for ep in range(seg_epochs):
@@ -356,22 +366,25 @@ def train_linear_seg(name, enc, dev, seg_epochs=30, seg_lr=1e-3, seg_bs=64):
         total = 0.0
         for s in range(0, n, seg_bs):
             bidx = perm[s:s + seg_bs]
-            f = train_feats[bidx].to(dev, non_blocking=True)  # (b,196,D)
-            lab = train_lab14[bidx].to(dev, non_blocking=True)  # (b,14,14)
+            f = ((train_feats[bidx] - mean) / std).to(dev, non_blocking=True)
+            lab = train_lab14[bidx].to(dev, non_blocking=True)
             logits = linear(f).view(-1, num_classes, 14, 14)
             loss = loss_fn(logits, lab)
             opt.zero_grad()
             loss.backward()
             opt.step()
             total += loss.item() * f.shape[0]
-        if ep % 5 == 0 or ep == seg_epochs - 1:
-            miou = _eval_seg_miou(linear, val_feats, val_labels, num_classes, dev)
+        sched.step()
+        if ep in (0, 5, 10, 15) or ep == seg_epochs - 1:
+            miou = _eval_seg_miou(linear, val_feats, val_labels, mean, std, num_classes, dev)
             print(
                 f"[seg] {name} epoch {ep}/{seg_epochs} loss={total/n:.4f} "
-                f"val_mIoU={miou:.2f}",
+                f"lr={sched.get_last_lr()[0]:.4f} val_mIoU={miou:.2f}",
                 flush=True,
             )
-    miou = _eval_seg_miou(linear, val_feats, val_labels, num_classes, dev)
+        else:
+            print(f"[seg] {name} epoch {ep}/{seg_epochs} loss={total/n:.4f}", flush=True)
+    miou = _eval_seg_miou(linear, val_feats, val_labels, mean, std, num_classes, dev)
     return {"mIoU": miou, "epochs": seg_epochs, "lr": seg_lr, "num_classes": num_classes}
 
 
