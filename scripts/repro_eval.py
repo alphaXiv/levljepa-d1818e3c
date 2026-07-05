@@ -795,6 +795,7 @@ IN-9 (Original/Mixed-Same/Mixed-Rand) — LeVLJEPA 96.96/91.01/79.75 (drops
 """
     eval_path = REPO_ROOT / "EVAL.md"
     eval_path.write_text(md)
+    (ARTIFACTS / "EVAL.md").write_text(md)
     print(f"[repro] wrote {eval_path}", flush=True)
 
 
