@@ -333,7 +333,7 @@ def _downsample_labels_224(labels224, bs=512):
     return out
 
 
-def train_linear_seg(name, enc, dev, seg_epochs=20, seg_lr=0.1, seg_bs=256):
+def train_linear_seg(name, enc, dev, seg_epochs=30, seg_lr=1e-2, seg_bs=256):
     train_split, val_split, num_classes, void, one_idx = _load_ade20k()
     train_ds = ADESegDataset(train_split, seg_transform(), num_classes, void, one_idx)
     val_ds = ADESegDataset(val_split, seg_transform(), num_classes, void, one_idx)
@@ -352,17 +352,22 @@ def train_linear_seg(name, enc, dev, seg_epochs=20, seg_lr=0.1, seg_bs=256):
     train_lab14 = _downsample_labels_224(train_labels).pin_memory()
     n = train_feats.shape[0]
     nv = (train_lab14 != 255).float().mean().item()
+    # Diagnostics: do patch tokens vary across the 196 spatial positions? If the
+    # spatial variance is ~0 the features are degenerate (extraction bug); if it
+    # is comparable to the overall variance they carry spatial signal.
+    samp = train_feats[:2000]
+    spatial_var = samp.var(dim=1).mean().item()
+    overall_var = samp.var().item()
     print(
         f"[seg] {name} feat{tuple(train_feats.shape)} mean={mean.mean().item():.3f} "
-        f"std={std.mean().item():.3f} label_nonvoid={nv:.3f} cls_present="
+        f"std={std.mean().item():.3f} spatial_var={spatial_var:.4f} "
+        f"overall_var={overall_var:.4f} label_nonvoid={nv:.3f} cls_present="
         f"{(train_lab14.view(-1).bincount(minlength=num_classes) > 0).sum().item()}",
         flush=True,
     )
 
-    linear = nn.Linear(D, num_classes, bias=False).to(dev)
-    opt = torch.optim.SGD(linear.parameters(), lr=seg_lr, momentum=0.9,
-                          weight_decay=1e-4)
-    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=seg_epochs)
+    linear = nn.Linear(D, num_classes, bias=True).to(dev)
+    opt = torch.optim.AdamW(linear.parameters(), lr=seg_lr, weight_decay=0.0)
     loss_fn = nn.CrossEntropyLoss(ignore_index=255)
     idx = torch.arange(n)
     rng = random.Random(0)
@@ -380,12 +385,11 @@ def train_linear_seg(name, enc, dev, seg_epochs=20, seg_lr=0.1, seg_bs=256):
             loss.backward()
             opt.step()
             total += loss.item() * f.shape[0]
-        sched.step()
         if ep in (0, 5, 10, 15) or ep == seg_epochs - 1:
             miou = _eval_seg_miou(linear, val_feats, val_labels, mean, std, num_classes, dev)
             print(
                 f"[seg] {name} epoch {ep}/{seg_epochs} loss={total/n:.4f} "
-                f"lr={sched.get_last_lr()[0]:.4f} val_mIoU={miou:.2f}",
+                f"val_mIoU={miou:.2f}",
                 flush=True,
             )
         else:
