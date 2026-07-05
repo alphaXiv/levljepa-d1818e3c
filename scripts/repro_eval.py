@@ -227,9 +227,20 @@ def _load_ade20k():
 
 
 class ADESegDataset(Dataset):
-    def __init__(self, hf_split, transform, num_classes, void, one_indexed, limit=None):
+    """Returns (image 224x224 tensor, label224 224x224 long). The label is
+    geometrically aligned with the image (same resize+center-crop, nearest
+    interpolation) so the 14x14 patch grid matches a 14x14 downsample of the
+    label. Void -> 255 (ignored)."""
+
+    def __init__(self, hf_split, img_tf, num_classes, void, one_indexed, limit=None):
         self.ds = hf_split
-        self.transform = transform
+        self.img_tf = img_tf
+        self.lab_tf = transforms.Compose(
+            [
+                transforms.Resize(256, interpolation=transforms.InterpolationMode.NEAREST),
+                transforms.CenterCrop(224),
+            ]
+        )
         self.num_classes = num_classes
         self.void = void
         self.one_indexed = one_indexed
@@ -244,7 +255,8 @@ class ADESegDataset(Dataset):
         lab = ex["annotation"]
         if lab.mode != "L":
             lab = lab.convert("L")
-        img = self.transform(img)
+        img = self.img_tf(img)
+        lab = self.lab_tf(lab)  # 224x224 PIL, aligned with img
         label = torch.as_tensor(np.array(lab, dtype=np.int64))
         if self.one_indexed:
             # 1..N -> 0..N-1, void (0) -> 255 ignore
@@ -256,13 +268,13 @@ class ADESegDataset(Dataset):
 
 def _seg_collate(batch):
     imgs = torch.stack([b[0] for b in batch], 0)
-    labs = [b[1] for b in batch]
+    labs = torch.stack([b[1] for b in batch], 0)  # (B,224,224) aligned
     return imgs, labs
 
 
 @torch.no_grad()
 def _cache_seg_features(name, enc, dataset, dev, tag, bs=128):
-    """Precompute (patch features [N,196,D], label maps list) to disk."""
+    """Precompute (patch features [N,196,D], aligned label224 [N,224,224])."""
     feat_path = FEAT_DIR / f"ade_{tag}_{name}_feat.pt"
     if feat_path.exists():
         print(f"[ade] using cached features {feat_path}", flush=True)
@@ -278,36 +290,32 @@ def _cache_seg_features(name, enc, dataset, dev, tag, bs=128):
         imgs = imgs.to(dev, non_blocking=True)
         _, patches = forward_features(name, enc, imgs)  # (B,196,D)
         feats.append(patches.cpu())
-        labels.extend(labs)  # labs is already a list of (H,W) tensors
+        labels.append(labs)  # (B,224,224)
     feats = torch.cat(feats, 0)  # (N,196,D)
+    labels = torch.cat(labels, 0)  # (N,224,224)
     torch.save({"feats": feats, "labels": labels}, feat_path)
     return feats, labels
 
 
 def _eval_seg_miou(linear, feats, labels, mean, std, num_classes, dev, bs=128):
-    """Evaluate mIoU, upsampling per-class logits to the GT resolution and
-    argmax-ing there (standard linear-seg eval)."""
+    """Evaluate mIoU at the aligned 224x224 label resolution: upsample the 14x14
+    per-class logits to 224x224 (bilinear) and argmax there."""
     linear.eval()
     cm = torch.zeros(num_classes, num_classes, dtype=torch.long)
     n = feats.shape[0]
     with torch.no_grad():
         for s in range(0, n, bs):
             f = ((feats[s:s + bs] - mean) / std).to(dev)  # (b,196,D)
-            lab = [labels[i] for i in range(s, min(s + bs, n))]
+            labs = labels[s:s + bs].to(dev)  # (b,224,224)
             logits = linear(f).view(-1, num_classes, 14, 14)
-            for j in range(logits.shape[0]):
-                gt = lab[j]  # CPU (H,W)
-                gh, gw = gt.shape
-                up = F.interpolate(
-                    logits[j:j + 1], size=(gh, gw), mode="bilinear", align_corners=False
-                )[0].argmax(0).cpu()  # (gh,gw)
-                g = gt
-                valid = g != 255
-                p = up[valid].to(torch.long)
-                g = g[valid].to(torch.long)
-                cm += torch.bincount(
-                    p * num_classes + g, minlength=num_classes * num_classes
-                ).reshape(num_classes, num_classes)
+            up = F.interpolate(logits, size=(224, 224), mode="bilinear", align_corners=False).argmax(1)
+            p = up.reshape(-1)
+            g = labs.reshape(-1)
+            valid = g != 255
+            p, g = p[valid], g[valid]
+            cm += torch.bincount(
+                p * num_classes + g, minlength=num_classes * num_classes
+            ).reshape(num_classes, num_classes).cpu()
     inter = torch.diag(cm).float()
     union = (cm.sum(0) + cm.sum(1) - torch.diag(cm)).float().clamp(min=1)
     iou = inter / union
@@ -315,19 +323,13 @@ def _eval_seg_miou(linear, feats, labels, mean, std, num_classes, dev, bs=128):
     return iou[present].mean().item() * 100
 
 
-def _downsample_labels(labels, bs=256):
-    """Vectorized 14x14 nearest downsample of variable-resolution label maps
-    (pad with void=255, interpolate the padded batch, unpad by ignoring)."""
-    n = len(labels)
+def _downsample_labels_224(labels224, bs=512):
+    """Nearest downsample of (N,224,224) labels to (N,14,14), batched."""
+    n = labels224.shape[0]
     out = torch.empty(n, 14, 14, dtype=torch.long)
     for s in range(0, n, bs):
-        chunk = labels[s:s + bs]
-        H = max(l.shape[0] for l in chunk)
-        W = max(l.shape[1] for l in chunk)
-        padded = torch.full((len(chunk), 1, H, W), 255, dtype=torch.float32)
-        for i, l in enumerate(chunk):
-            padded[i, 0, : l.shape[0], : l.shape[1]] = l.float()
-        out[s:s + len(chunk)] = F.interpolate(padded, size=(14, 14), mode="nearest")[:, 0].long()
+        chunk = labels224[s:s + bs].unsqueeze(1).float()  # (b,1,224,224)
+        out[s:s + chunk.shape[0]] = F.interpolate(chunk, size=(14, 14), mode="nearest")[:, 0].long()
     return out
 
 
@@ -347,9 +349,8 @@ def train_linear_seg(name, enc, dev, seg_epochs=20, seg_lr=0.1, seg_bs=256):
     std = flat.std(0).clamp(min=1e-8).cpu()
     del flat
     torch.cuda.empty_cache()
-    train_lab14 = _downsample_labels(train_labels).pin_memory()
+    train_lab14 = _downsample_labels_224(train_labels).pin_memory()
     n = train_feats.shape[0]
-    # Sanity: report label non-void fraction + feature stats.
     nv = (train_lab14 != 255).float().mean().item()
     print(
         f"[seg] {name} feat{tuple(train_feats.shape)} mean={mean.mean().item():.3f} "

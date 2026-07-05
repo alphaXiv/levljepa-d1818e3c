@@ -218,6 +218,12 @@ def _(Image, IM_MEAN, IM_STD, NUM_ADE, ONE_IDX, VOID, np, transforms):
             transforms.Normalize(IM_MEAN, IM_STD),
         ]
     )
+    lab_tf = transforms.Compose(
+        [
+            transforms.Resize(224, interpolation=transforms.InterpolationMode.NEAREST),
+            transforms.CenterCrop(224),
+        ]
+    )
 
 
     class ADESeg(Dataset):
@@ -231,14 +237,14 @@ def _(Image, IM_MEAN, IM_STD, NUM_ADE, ONE_IDX, VOID, np, transforms):
         def __getitem__(self, i):
             ex = self.split[i]
             img = seg_tf(ex["image"].convert("RGB"))
-            lab = ex["annotation"].convert("L")
+            lab = lab_tf(ex["annotation"].convert("L"))
             lab = torch.as_tensor(np.array(lab, dtype=np.int64))
             if ONE_IDX:
                 lab = torch.where(lab == 0, torch.tensor(255), lab - 1)
             else:
                 lab = torch.where(lab == VOID, torch.tensor(255), lab)
             return img, lab
-    return ADESeg, seg_tf
+    return ADESeg, lab_tf, seg_tf
 
 
 @app.cell
@@ -256,56 +262,53 @@ def _(ADESeg, DEV, F, DataLoader, NUM_ADE, ade_train, ade_val, dim_of, feats, n_
                 _, p = feats(name, img)
                 fs.append(p.cpu())
                 ls.append(lab)
-            fs = torch.cat(fs, 0)
-            ls = [lab[i] for batch in ls for i in range(batch.shape[0])]
-            return fs, ls
+            return torch.cat(fs, 0), torch.cat(ls, 0)  # (N,196,D),(N,224,224)
 
-        trf, trl = cache(tr)
+        trf, trl = cache(tr)  # trl: (N,224,224)
         vaf, val = cache(va)
+        # standardize
+        flat = trf.reshape(-1, D).to(DEV)
+        mean = flat.mean(0).cpu()
+        std = flat.std(0).clamp(min=1e-8).cpu()
+        del flat
+        torch.cuda.empty_cache()
+        # aligned 14x14 labels
+        trl14 = F.interpolate(trl.unsqueeze(1).float(), size=(14, 14), mode="nearest")[:, 0].long()
         lin = nn.Linear(D, NUM_ADE, bias=False).to(DEV)
-        opt = torch.optim.AdamW(lin.parameters(), lr=1e-3)
+        opt = torch.optim.SGD(lin.parameters(), lr=0.1, momentum=0.9, weight_decay=1e-4)
+        sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
         lossf = nn.CrossEntropyLoss(ignore_index=255)
         idx = torch.arange(trf.shape[0])
         rng = random.Random(0)
         for ep in range(epochs):
             lin.train()
             perm = idx[rng.sample(range(trf.shape[0]), trf.shape[0])]
-            for s in range(0, trf.shape[0], 64):
-                b = perm[s:s + 64]
-                f = trf[b].to(DEV)
-                l = torch.stack(
-                    [
-                        F.interpolate(
-                            trl[i].unsqueeze(0).unsqueeze(0).float(), size=(14, 14), mode="nearest"
-                        )[0, 0].long()
-                        for i in b.tolist()
-                    ],
-                    0,
-                )
+            for s in range(0, trf.shape[0], 128):
+                b = perm[s:s + 128]
+                f = ((trf[b] - mean) / std).to(DEV)
+                l = trl14[b].to(DEV)
                 logits = lin(f).view(-1, NUM_ADE, 14, 14)
                 loss = lossf(logits, l)
                 opt.zero_grad()
                 loss.backward()
                 opt.step()
-        # eval mIoU
+            sched.step()
+        # eval mIoU at 224x224
         lin.eval()
-        inter = torch.zeros(NUM_ADE, dtype=torch.long)
-        union = torch.zeros(NUM_ADE, dtype=torch.long)
+        cm = torch.zeros(NUM_ADE, NUM_ADE, dtype=torch.long)
         with torch.no_grad():
             for j in range(vaf.shape[0]):
-                f = vaf[j:j + 1].to(DEV)
-                g = val[j]
-                gh, gw = g.shape
-                pred = lin(f).view(1, NUM_ADE, 14, 14).argmax(1)[0]
-                pred = F.interpolate(pred[None, None].float(), size=(gh, gw), mode="bilinear", align_corners=False)[0, 0].round().long()
+                f = ((vaf[j:j + 1] - mean) / std).to(DEV)
+                g = val[j].to(DEV)
+                logits = lin(f).view(1, NUM_ADE, 14, 14)
+                up = F.interpolate(logits, size=(224, 224), mode="bilinear", align_corners=False).argmax(1)[0]
                 valid = g != 255
-                p, g = pred[valid], g[valid]
-                for c in range(NUM_ADE):
-                    inter[c] += ((p == c) & (g == c)).sum()
-                    union[c] += ((p == c) | (g == c)).sum()
-        iou = inter.float() / union.float().clamp(min=1)
-        present = union > 0
-        return iou[present].mean().item() * 100
+                p, gg = up[valid], g[valid]
+                cm += torch.bincount(p * NUM_ADE + gg, minlength=NUM_ADE * NUM_ADE).reshape(NUM_ADE, NUM_ADE).cpu()
+        inter = torch.diag(cm).float()
+        union = (cm.sum(0) + cm.sum(1) - torch.diag(cm)).float().clamp(min=1)
+        present = (cm.sum(0) + cm.sum(1) - torch.diag(cm)) > 0
+        return (inter / union)[present].mean().item() * 100
     return (run_seg,)
 
 
