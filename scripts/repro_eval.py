@@ -315,17 +315,20 @@ def _eval_seg_miou(linear, feats, labels, mean, std, num_classes, dev, bs=128):
     return iou[present].mean().item() * 100
 
 
-def _downsample_labels(labels, num_classes):
-    """Precompute 14x14 downsampled labels (nearest) for training the linear
-    head; done once so per-epoch loops are cheap."""
-    out = []
-    for lab in labels:
-        out.append(
-            F.interpolate(
-                lab.unsqueeze(0).unsqueeze(0).float(), size=(14, 14), mode="nearest"
-            )[0, 0].long()
-        )
-    return torch.stack(out, 0)  # (N,14,14)
+def _downsample_labels(labels, bs=256):
+    """Vectorized 14x14 nearest downsample of variable-resolution label maps
+    (pad with void=255, interpolate the padded batch, unpad by ignoring)."""
+    n = len(labels)
+    out = torch.empty(n, 14, 14, dtype=torch.long)
+    for s in range(0, n, bs):
+        chunk = labels[s:s + bs]
+        H = max(l.shape[0] for l in chunk)
+        W = max(l.shape[1] for l in chunk)
+        padded = torch.full((len(chunk), 1, H, W), 255, dtype=torch.float32)
+        for i, l in enumerate(chunk):
+            padded[i, 0, : l.shape[0], : l.shape[1]] = l.float()
+        out[s:s + len(chunk)] = F.interpolate(padded, size=(14, 14), mode="nearest")[:, 0].long()
+    return out
 
 
 def train_linear_seg(name, enc, dev, seg_epochs=20, seg_lr=0.1, seg_bs=256):
@@ -338,17 +341,19 @@ def train_linear_seg(name, enc, dev, seg_epochs=20, seg_lr=0.1, seg_bs=256):
 
     # Per-dim standardization over all train patch tokens (helps the linear
     # head separate spatially; raw LayerNorm'd features can otherwise collapse
-    # to a constant prediction under SGD/AdamW).
-    flat = train_feats.reshape(-1, D)
-    mean = flat.mean(0)
-    std = flat.std(0).clamp(min=1e-8)
-    train_lab14 = _downsample_labels(train_labels, num_classes).pin_memory()
+    # to a constant prediction under SGD/AdamW). Compute stats on GPU for speed.
+    flat = train_feats.reshape(-1, D).to(dev)
+    mean = flat.mean(0).cpu()
+    std = flat.std(0).clamp(min=1e-8).cpu()
+    del flat
+    torch.cuda.empty_cache()
+    train_lab14 = _downsample_labels(train_labels).pin_memory()
     n = train_feats.shape[0]
     # Sanity: report label non-void fraction + feature stats.
     nv = (train_lab14 != 255).float().mean().item()
     print(
-        f"[seg] {name} feat{tuple(train_feats.shape)} mean={flat.mean().item():.3f} "
-        f"std={flat.std().item():.3f} label_nonvoid={nv:.3f} cls_present="
+        f"[seg] {name} feat{tuple(train_feats.shape)} mean={mean.mean().item():.3f} "
+        f"std={std.mean().item():.3f} label_nonvoid={nv:.3f} cls_present="
         f"{(train_lab14.view(-1).bincount(minlength=num_classes) > 0).sum().item()}",
         flush=True,
     )
