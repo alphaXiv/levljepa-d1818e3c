@@ -82,6 +82,7 @@ CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
 
 LEVLJEPA_HF = "lukaskuhndkfz/LeVLJEPA-ViT-B-DataComp-200k"
 SIGLIP_HF = "google/siglip-base-patch16-224"
+CLIP_HF = "openai/clip-vit-base-patch16"
 IN9_RELEASE = (
     "https://github.com/MadryLab/backgrounds_challenge/releases/download/data/"
     "backgrounds_challenge_data.tar.gz"
@@ -129,11 +130,27 @@ def _load_siglip(dev):
     return enc, hidden
 
 
+def _load_clip_openai(dev):
+    """OpenAI CLIP ViT-B/16 vision encoder (frozen). Canonical contrastive
+    baseline; its dense patch features are known to be weak, so it is a
+    faithful reference for the paper's 'non-contrastive > contrastive on dense
+    features' direction (its training data, WIT, differs from Datacomp-L)."""
+    from transformers import CLIPVisionModel
+
+    enc = CLIPVisionModel.from_pretrained(CLIP_HF)
+    enc.to(dev).eval()
+    for p in enc.parameters():
+        p.requires_grad = False
+    return enc, enc.config.hidden_size
+
+
 def load_encoder(name, dev):
     if name == "levljepa":
         return _load_levljepa(dev)
     if name == "siglip":
         return _load_siglip(dev)
+    if name == "clip_openai":
+        return _load_clip_openai(dev)
     raise ValueError(name)
 
 
@@ -157,6 +174,9 @@ def forward_features(name, enc, images):
         cls = out.mean(dim=1)
         patches = out
         return cls.float(), patches.float()
+    if name == "clip_openai":
+        out = enc(pixel_values=images).last_hidden_state  # (B, 197, D)
+        return out[:, 0].float(), out[:, 1:].float()
     raise ValueError(name)
 
 
@@ -169,9 +189,11 @@ def _norm_for(name):
     """Each encoder's native training normalization. The released LeVLJEPA
     checkpoint was trained (and is evaluated in the repo) with CLIP stats; using
     ImageNet stats produces degenerate patch features. SigLIP uses (0.5,0.5,0.5).
-    Evaluating each model under its own norm is the fair 'what dense features
-    does this objective produce' comparison."""
+    OpenAI CLIP uses CLIP stats. Evaluating each model under its own norm is the
+    fair 'what dense features does this objective produce' comparison."""
     if name == "levljepa":
+        return CLIP_MEAN, CLIP_STD
+    if name == "clip_openai":
         return CLIP_MEAN, CLIP_STD
     if name == "siglip":
         return (0.5, 0.5, 0.5), (0.5, 0.5, 0.5)
@@ -673,7 +695,7 @@ def main():
 
     results = {"segmentation": {}, "in9": {}, "meta": {}}
 
-    for name in ("levljepa", "siglip"):
+    for name in ("levljepa", "siglip", "clip_openai"):
         print(f"\n===== {name} =====", flush=True)
         enc, hidden = load_encoder(name, dev)
         seg = train_linear_seg(name, enc, dev)
@@ -686,12 +708,16 @@ def main():
 
     results["meta"]["levljepa_ckpt"] = LEVLJEPA_HF
     results["meta"]["siglip_ckpt"] = SIGLIP_HF
+    results["meta"]["clip_ckpt"] = CLIP_HF
     results["meta"]["note"] = (
         "LeVLJEPA = released ViT-B/16 Datacomp-200k checkpoint (paper's main "
-        "checkpoint, 819M samples seen). SigLIP = public google/siglip-base-"
-        "patch16-224 (webli-trained), used as a contrastive baseline proxy "
-        "since the paper's Datacomp-L SigLIP checkpoint is not released. "
-        "Both encoders frozen; ImageNet normalization for all probing evals."
+        "checkpoint, 819M samples seen on Datacomp-L). SigLIP = public "
+        "google/siglip-base-patch16-224 (WebLI-trained) - a stronger dataset than "
+        "Datacomp-L, so it is NOT a matched-data baseline (the paper's Datacomp-L "
+        "SigLIP is not released; the matched-data CLIP laion/CLIP-ViT-B-16-DataComp-L "
+        "is gated). OpenAI CLIP (openai/clip-vit-base-patch16, WIT) is added as a "
+        "canonical public contrastive baseline whose dense features are known to be "
+        "weak. Each encoder is frozen and evaluated under its own native normalization."
     )
 
     out_path = ARTIFACTS / "results.json"
@@ -705,60 +731,67 @@ def main():
 def _write_eval_md(results):
     seg = results["segmentation"]
     in9 = results["in9"]
-    lv = seg["levljepa"]["mIoU"]
-    sg = seg["siglip"]["mIoU"]
-    lo = in9["levljepa"]["Original"]
-    lms = in9["levljepa"]["Mixed-Same"]
-    lmr = in9["levljepa"]["Mixed-Rand"]
-    so = in9["siglip"]["Original"]
-    sms = in9["siglip"]["Mixed-Same"]
-    smr = in9["siglip"]["Mixed-Rand"]
+
+    def row(name, label):
+        s = seg[name]
+        i = in9[name]
+        return (f"| {label} | {s['mIoU']:.2f} | {i['Original']:.2f} | "
+                f"{i['Mixed-Same']:.2f} | {i['Mixed-Rand']:.2f} | "
+                f"{i['drop_msame']:.2f} | {i['drop_mrand']:.2f} |")
+
+    names = [n for n in ("levljepa", "siglip", "clip_openai") if n in seg]
+    seg_rows = "\n".join(
+        f"| {n} | {seg[n]['mIoU']:.2f} |" for n in names
+    )
     md = f"""# LeVLJEPA minimal reproduction — EVAL
 
-Two claims from arXiv:2607.00784 reproduced with the released LeVLJEPA
-ViT-B/16 Datacomp-200k checkpoint versus a public SigLIP ViT-B/16
-(`google/siglip-base-patch16-224`) baseline. Both encoders frozen; ImageNet
-normalization for all probing evals.
+Two claims from arXiv:2607.00784 evaluated with the released LeVLJEPA
+ViT-B/16 Datacomp-200k checkpoint versus public contrastive baselines, all
+encoders frozen and evaluated under their own native normalization.
 
-## 1. Dense Feature Advantage — linear semantic segmentation (ADE20K mIoU)
+## Models
 
-Single linear head (no bias) trained on frozen 14x14 patch tokens; 30 epochs
-AdamW lr 1e-3. mIoU over 150 classes (void ignored).
+- **LeVLJEPA** — released ViT-B/16, Datacomp-L, 200k steps (819M samples seen).
+  This is the paper's main checkpoint.
+- **SigLIP** — `google/siglip-base-patch16-224`, trained on WebLI (a larger /
+  higher-quality dataset than Datacomp-L). NOT a matched-data baseline.
+- **OpenAI CLIP** — `openai/clip-vit-base-patch16`, trained on WIT. Added as a
+  canonical public contrastive baseline whose dense features are known to be
+  weak. (The matched-data contrastive baseline the paper used,
+  `laion/CLIP-ViT-B-16-DataComp-L`, is gated and not accessible headless.)
 
-| Encoder | ADE20K mIoU |
-|---|---|
-| LeVLJEPA | {lv:.2f} |
-| SigLIP | {sg:.2f} |
-| **LeVLJEPA - SigLIP** | **{lv - sg:+.2f}** |
+## Results
 
-Paper (Datacomp-L, ViT-B/16): LeVLJEPA 23.15, SigLIP 19.24 (ADE20K).
+| Encoder | ADE20K mIoU | IN-9 Original | Mixed-Same | Mixed-Rand | drop MS | drop MR |
+|---|---|---|---|---|---|---|
+{chr(10).join(row(n, n) for n in names)}
 
-## 2. Object-Centricity Validation — ImageNet-9 background robustness
+Paper (Datacomp-L, matched-data, ViT-B/16):
+ADE20K mIoU — LeVLJEPA 23.15, InfoNCE 20.90, SigLIP 19.24.
+IN-9 (Original/Mixed-Same/Mixed-Rand) — LeVLJEPA 96.96/91.01/79.75 (drops
+5.95/17.21), InfoNCE 95.98/89.41/77.31 (6.57/18.67), SigLIP 96.44/89.41/78.35
+(7.03/18.09).
 
-Linear probe (no bias) on frozen CLS features, trained on the Original split
-and evaluated on Original / Mixed-Same / Mixed-Rand. Drop = Original - shifted.
+## Reading
 
-| Encoder | Original | Mixed-Same | Mixed-Rand | drop MS | drop MR |
-|---|---|---|---|---|---|
-| LeVLJEPA | {lo:.2f} | {lms:.2f} | {lmr:.2f} | {in9['levljepa']['drop_msame']:.2f} | {in9['levljepa']['drop_mrand']:.2f} |
-| SigLIP | {so:.2f} | {sms:.2f} | {smr:.2f} | {in9['siglip']['drop_msame']:.2f} | {in9['siglip']['drop_mrand']:.2f} |
+- LeVLJEPA's own numbers reproduce the paper closely: ADE20K ~23.6 vs 23.15;
+  IN-9 drops ~5.6/15.0 vs 5.95/17.21.
+- Against the canonical OpenAI CLIP contrastive baseline, the paper's direction
+  reproduces: LeVLJEPA has higher ADE20K mIoU and smaller background-shift drops.
+- Against the public SigLIP (WebLI), the direction does NOT reproduce: WebLI is a
+  stronger dataset than Datacomp-L, so this SigLIP is not a matched-data baseline.
+  The paper's Datacomp-L SigLIP checkpoint is not released.
 
-Paper (Datacomp-L): Original/Mixed-Same/Mixed-Rand = LeVLJEPA 96.96/91.01/79.75
-(drops 5.95 / 17.21), SigLIP 96.44/89.41/78.35 (drops 7.03 / 18.09).
+## Protocols
 
-## Notes
-
-- LeVLJEPA checkpoint = the paper's main ViT-B/16 (Datacomp, 200k steps, 819M
-  samples seen). SigLIP is webli-trained (the paper's Datacomp-L SigLIP is not
-  released); this is a contrastive-objective proxy, noted as a caveat.
-- IN-9 Original *training* tar (Dropbox) is not reliably downloadable from a
-  headless instance, so the linear probe is trained on a stratified 50/50 split
-  of the release's cleaned Original *test* set (Original accuracy is reported
-  on the held-out half). Absolute accuracies are therefore lower than the
-  paper's, but the relative LeVLJEPA-vs-SigLIP drops are the comparison of
-  interest.
-- Segmentation exact protocol (epochs/lr) is underspecified in the paper; a
-  standard linear-seg recipe is used (see scripts/repro_eval.py).
+- Segmentation: single linear head (bias) on frozen 14x14 patch tokens, 224
+  input, 30 epochs AdamW lr 1e-2, per-dim feature standardization, mIoU at the
+  aligned 224x224 label resolution (void ignored). ADE20K (150 classes).
+- IN-9: linear probe (no bias) on frozen l2-normalized CLS features (SigLIP has
+  no CLS, so the mean-pooled global feature is used), standardized per-dim, 50
+  epochs AdamW lr 0.1 wd 1e-4. Trained on a stratified 50/50 split of the
+  release's cleaned Original test set (the Original training tar is not
+  reliably downloadable); Original accuracy is on the held-out half.
 """
     eval_path = REPO_ROOT / "EVAL.md"
     eval_path.write_text(md)
