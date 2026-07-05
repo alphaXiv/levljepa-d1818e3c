@@ -1,5 +1,30 @@
 # LeVLJEPA
 
+## Implementation notes
+
+Reproduces two claims from the paper with the released ViT-B/16 Datacomp-200k
+checkpoint against public contrastive baselines, all encoders frozen.
+
+```bash
+bash run_repro.sh
+```
+
+- Runs in ~34 min on one H100 (~$1). Downloads the LeVLJEPA, SigLIP, and
+  OpenAI-CLIP vision encoders plus ADE20K and the ImageNet-9 release itself.
+- Outputs `EVAL.md` (a 3-model comparison table) and
+  `.openresearch/artifacts/results.json`.
+- LeVLJEPA's own numbers reproduce the paper (ADE20K 23.6 vs 23.15 mIoU; IN-9
+  drops 5.9/15.5 vs 5.95/17.21). The *comparative* claims do not reproduce
+  against the only public SigLIP (WebLI) and OpenAI CLIP (WIT), because both
+  are trained on stronger datasets than Datacomp-L; the paper's matched-data
+  contrastive checkpoints are not public. See the uploaded reproduction report.
+- Two non-obvious fixes were required: evaluate each encoder under its **own**
+  normalization (the released LeVLJEPA checkpoint uses CLIP stats, not
+  ImageNet, or its patch features are degenerate), and `.permute(0,2,1)` the
+  `(B,196,C)` linear-head output to `(B,C,14,14)` before the loss/eval or the
+  head silently collapses to the majority class.
+- Interactive version: [marimo notebook](https://molab.marimo.io/github/alphaXiv/levljepa-d1818e3c/blob/main/notebooks/repro.py)
+
 **LeVLJEPA: End-to-End Vision-Language Pretraining Without Negatives**
 
 Official implementation of **LeVLJEPA**, the first fully non-contrastive,

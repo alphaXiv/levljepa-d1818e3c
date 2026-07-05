@@ -38,29 +38,21 @@ def _():
         # LeVLJEPA — minimal reproduction
 
         Reproduces two claims from **LeVLJEPA: End-to-End Vision-Language
-        Pretraining Without Negatives** (arXiv:2607.00784):
+        Pretraining Without Negatives** (arXiv:2607.00784) using the released
+        ViT-B/16 Datacomp-200k checkpoint against public contrastive baselines:
 
-        1. **Dense Feature Advantage** — a frozen LeVLJEPA ViT-B/16 beats a
-           contrastive SigLIP ViT-B/16 on linear semantic segmentation
-           (ADE20K mIoU), even though it trails on zero-shot alignment.
-        2. **Object-Centricity Validation** — LeVLJEPA's global representation
-           is more robust to background substitution on the ImageNet-9
-           background-shift challenge (smaller accuracy drops).
+        1. **Dense Feature Advantage** — linear semantic segmentation on ADE20K
+           (frozen patch tokens, mIoU).
+        2. **Object-Centricity Validation** — ImageNet-9 background-shift
+           robustness (linear probe on frozen CLS features).
 
-        This notebook is self-contained: it downloads the checkpoints and a
-        small slice of the evaluation data into the notebook (marimo does not
-        clone the repo), runs both frozen-encoder evaluations at a reduced
-        scale so it finishes in minutes, and plots the comparison. The full
-        reproduction (whole datasets) is `bash run_repro.sh` in the repo.
+        Self-contained: marimo does not clone the repo, so checkpoints and a
+        small slice of the eval data are downloaded into the notebook. Sliders
+        default to small subsets so it finishes in minutes; run
+        `bash run_repro.sh` in the repo for full-scale numbers.
         """
     )
     return (mo,)
-
-
-@app.cell
-def _(mo):
-    mo.md("## Setup — devices and configuration")
-    return
 
 
 @app.cell
@@ -68,7 +60,7 @@ def _():
     import os
     import random
     import tarfile
-    import urllib.request
+    import urllib.request as urlreq
     from pathlib import Path
 
     import numpy as np
@@ -83,50 +75,22 @@ def _():
     DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     DEV
     return (
-        DEV,
-        Dataset,
-        DataLoader,
-        F,
-        Image,
-        Path,
-        Dataset,
-        nn,
-        np,
-        os,
-        random,
-        tarfile,
-        torch,
-        transforms,
-        urllib,
-        urllib.request,
+        DEV, Dataset, DataLoader, F, Image, Path, nn, np, os, random, tarfile,
+        torch, transforms, urlreq,
     )
 
 
 @app.cell
 def _(mo):
-    n_ade_train = mo.slider(64, 4000, value=600, label="ADE20K train images (subset)")
-    n_ade_val = mo.slider(32, 1000, value=200, label="ADE20K val images (subset)")
-    n_in9_per_class = mo.slider(20, 200, value=60, label="IN-9 images per class (subset)")
-    n_ade_train, n_ade_val, n_in9_per_class
+    n_ade_train = mo.slider(64, 4000, value=600, label="ADE20K train images")
+    n_ade_val = mo.slider(32, 1000, value=200, label="ADE20K val images")
+    n_in9_per_class = mo.slider(20, 200, value=60, label="IN-9 images per class")
     return n_ade_train, n_ade_val, n_in9_per_class
 
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
-        *Note:* these sliders default to small subsets so the notebook runs in
-        a few minutes even on CPU. Absolute numbers will be lower than the
-        paper's full-scale numbers; the **direction** (LeVLJEPA vs SigLIP) is
-        what the claims are about.
-        """
-    )
-    return
-
-
-@app.cell
-def _(mo):
-    mo.md("## Load the two frozen vision encoders")
+    mo.md("## Load the three frozen vision encoders (ViT-B/16, native norm)")
     return
 
 
@@ -134,13 +98,15 @@ def _(mo):
 def _():
     LEVLJEPA_HF = "lukaskuhndkfz/LeVLJEPA-ViT-B-DataComp-200k"
     SIGLIP_HF = "google/siglip-base-patch16-224"
-    IM_MEAN = (0.485, 0.456, 0.406)
-    IM_STD = (0.229, 0.224, 0.225)
-    return LEVLJEPA_HF, SIGLIP_HF, IM_MEAN, IM_STD
+    CLIP_HF = "openai/clip-vit-base-patch16"
+    CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
+    CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
+    MODELS = ["levljepa", "siglip", "clip_openai"]
+    return LEVLJEPA_HF, SIGLIP_HF, CLIP_HF, CLIP_MEAN, CLIP_STD, MODELS
 
 
 @app.cell
-def _(LEVLJEPA_HF, torch):
+def _(DEV, LEVLJEPA_HF, torch):
     import timm
     from huggingface_hub import hf_hub_download
     from safetensors.torch import load_file
@@ -155,7 +121,7 @@ def _(LEVLJEPA_HF, torch):
     enc.to(DEV).eval()
     for p in enc.parameters():
         p.requires_grad = False
-    "LeVLJEPA ViT-B/16 loaded (frozen)"
+    "LeVLJEPA loaded"
     return enc, timm, load_file, hf_hub_download
 
 
@@ -167,26 +133,48 @@ def _(DEV, SIGLIP_HF, torch):
     senc.to(DEV).eval()
     for p in senc.parameters():
         p.requires_grad = False
-    "SigLIP ViT-B/16 loaded (frozen)"
+    "SigLIP loaded"
     return SiglipVisionModel, senc
 
 
 @app.cell
-def _(DEV, F, enc, np, senc, torch):
+def _(CLIP_HF, DEV, torch):
+    from transformers import CLIPVisionModel
+
+    cenc = CLIPVisionModel.from_pretrained(CLIP_HF)
+    cenc.to(DEV).eval()
+    for p in cenc.parameters():
+        p.requires_grad = False
+    "OpenAI CLIP loaded"
+    return CLIPVisionModel, cenc
+
+
+@app.cell
+def _(cenc, enc, np, senc, torch):
     @torch.no_grad()
     def feats(name, images):
         """Return (cls [B,D], patches [B,196,D]) for a 224x224 batch."""
         if name == "levljepa":
-            f = enc.forward_features(images)  # (B,197,D): CLS + 196 patches
+            f = enc.forward_features(images)  # (B,197,D)
             return f[:, 0].float(), f[:, 1:].float()
-        # SigLIP has NO cls token: 196 patch tokens; global = mean.
-        out = senc(pixel_values=images).last_hidden_state  # (B,196,D)
+        if name == "clip_openai":
+            out = cenc(pixel_values=images).last_hidden_state  # (B,197,D)
+            return out[:, 0].float(), out[:, 1:].float()
+        out = senc(pixel_values=images).last_hidden_state  # (B,196,D), no CLS
         return out.mean(dim=1).float(), out.float()
 
 
     def dim_of(name):
-        return enc.embed_dim if name == "levljepa" else senc.config.hidden_size
-    return feats, dim_of
+        return {
+            "levljepa": enc.embed_dim,
+            "clip_openai": cenc.config.hidden_size,
+            "siglip": senc.config.hidden_size,
+        }[name]
+
+
+    def norm_for(name):
+        return (CLIP_MEAN, CLIP_STD) if name != "siglip" else ((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+    return feats, dim_of, norm_for
 
 
 @app.cell
@@ -201,24 +189,24 @@ def _():
 
     ade = load_dataset("merve/scene_parse_150")
     ade_train, ade_val = ade["train"], ade["validation"]
-    # ADE20K scene parsing has 150 classes. This mirror uses the
-    # ADEChallengeData2016 encoding: 0 = void, classes 1..150 (verified by
-    # scanning all 2000 val annotations: max==150, no 255).
-    NUM_ADE, VOID, ONE_IDX = 150, 0, True
-    NUM_ADE, VOID, ONE_IDX
+    NUM_ADE, VOID, ONE_IDX = 150, 0, True  # verified: 0=void, 1..150 classes
+    NUM_ADE
     return NUM_ADE, VOID, ONE_IDX, ade_train, ade_val, load_dataset
 
 
 @app.cell
-def _(Image, IM_MEAN, IM_STD, NUM_ADE, ONE_IDX, VOID, np, transforms):
-    seg_tf = transforms.Compose(
-        [
-            transforms.Resize(224, interpolation=transforms.InterpolationMode.BICUBIC),
-            transforms.CenterCrop(224),
-            transforms.ToTensor(),
-            transforms.Normalize(IM_MEAN, IM_STD),
-        ]
-    )
+def _(Dataset, Image, NUM_ADE, ONE_IDX, VOID, np, transforms):
+    def seg_tf_for(norm):
+        mean, std = norm
+        return transforms.Compose(
+            [
+                transforms.Resize(224, interpolation=transforms.InterpolationMode.BICUBIC),
+                transforms.CenterCrop(224),
+                transforms.ToTensor(),
+                transforms.Normalize(mean, std),
+            ]
+        )
+
     lab_tf = transforms.Compose(
         [
             transforms.Resize(224, interpolation=transforms.InterpolationMode.NEAREST),
@@ -228,60 +216,48 @@ def _(Image, IM_MEAN, IM_STD, NUM_ADE, ONE_IDX, VOID, np, transforms):
 
 
     class ADESeg(Dataset):
-        def __init__(self, split, n):
-            self.split = split
-            self.n = min(n, len(split))
+        def __init__(self, split, n, img_tf):
+            self.split, self.n, self.img_tf = split, min(n, len(split)), img_tf
 
         def __len__(self):
             return self.n
 
         def __getitem__(self, i):
             ex = self.split[i]
-            img = seg_tf(ex["image"].convert("RGB"))
+            img = self.img_tf(ex["image"].convert("RGB"))
             lab = lab_tf(ex["annotation"].convert("L"))
             lab = torch.as_tensor(np.array(lab, dtype=np.int64))
-            if ONE_IDX:
-                lab = torch.where(lab == 0, torch.tensor(255), lab - 1)
-            else:
-                lab = torch.where(lab == VOID, torch.tensor(255), lab)
+            lab = torch.where(lab == 0, torch.tensor(255), lab - 1) if ONE_IDX else torch.where(lab == VOID, torch.tensor(255), lab)
             return img, lab
-    return ADESeg, lab_tf, seg_tf
+    return ADESeg, lab_tf, seg_tf_for
 
 
 @app.cell
-def _(ADESeg, DEV, F, DataLoader, NUM_ADE, ade_train, ade_val, dim_of, feats, n_ade_train, n_ade_val, np, torch):
+def _(ADESeg, DEV, F, DataLoader, NUM_ADE, ade_train, ade_val, dim_of, feats, norm_for, n_ade_train, n_ade_val, np, seg_tf_for, torch):
     def run_seg(name, ntr, nva, epochs=20):
-        tr = ADESeg(ade_train, ntr)
-        va = ADESeg(ade_val, nva)
+        tf = seg_tf_for(norm_for(name))
+        tr, va = ADESeg(ade_train, ntr, tf), ADESeg(ade_val, nva, tf)
         D = dim_of(name)
 
         def cache(ds):
             loader = DataLoader(ds, batch_size=64, shuffle=False, num_workers=4)
             fs, ls = [], []
             for img, lab in loader:
-                img = img.to(DEV)
-                _, p = feats(name, img)
-                fs.append(p.cpu())
-                ls.append(lab)
-            return torch.cat(fs, 0), torch.cat(ls, 0)  # (N,196,D),(N,224,224)
+                _, p = feats(name, img.to(DEV))
+                fs.append(p.cpu()); ls.append(lab)
+            return torch.cat(fs, 0), torch.cat(ls, 0)
 
-        trf, trl = cache(tr)  # trl: (N,224,224)
+        trf, trl = cache(tr)
         vaf, val = cache(va)
-        # standardize
         flat = trf.reshape(-1, D).to(DEV)
-        mean = flat.mean(0).cpu()
-        std = flat.std(0).clamp(min=1e-8).cpu()
-        del flat
-        torch.cuda.empty_cache()
-        # aligned 14x14 labels
+        mean, std = flat.mean(0).cpu(), flat.std(0).clamp(min=1e-8).cpu()
+        del flat; torch.cuda.empty_cache()
         trl14 = F.interpolate(trl.unsqueeze(1).float(), size=(14, 14), mode="nearest")[:, 0].long()
-        lin = nn.Linear(D, NUM_ADE, bias=False).to(DEV)
-        opt = torch.optim.SGD(lin.parameters(), lr=0.1, momentum=0.9, weight_decay=1e-4)
-        sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
-        lossf = nn.CrossEntropyLoss(ignore_index=255)
-        idx = torch.arange(trf.shape[0])
-        rng = random.Random(0)
-        for ep in range(epochs):
+        lin = nn.Linear(D, NUM_ADE, bias=True).to(DEV)
+        opt = torch.optim.AdamW(lin.parameters(), lr=1e-2)
+        lf = nn.CrossEntropyLoss(ignore_index=255)
+        idx = torch.arange(trf.shape[0]); rng = random.Random(0)
+        for _ in range(epochs):
             lin.train()
             perm = idx[rng.sample(range(trf.shape[0]), trf.shape[0])]
             for s in range(0, trf.shape[0], 128):
@@ -289,12 +265,8 @@ def _(ADESeg, DEV, F, DataLoader, NUM_ADE, ade_train, ade_val, dim_of, feats, n_
                 f = ((trf[b] - mean) / std).to(DEV)
                 l = trl14[b].to(DEV)
                 logits = lin(f).permute(0, 2, 1).contiguous().view(-1, NUM_ADE, 14, 14)
-                loss = lossf(logits, l)
-                opt.zero_grad()
-                loss.backward()
-                opt.step()
-            sched.step()
-        # eval mIoU at 224x224
+                loss = lf(logits, l)
+                opt.zero_grad(); loss.backward(); opt.step()
         lin.eval()
         cm = torch.zeros(NUM_ADE, NUM_ADE, dtype=torch.long)
         with torch.no_grad():
@@ -303,8 +275,8 @@ def _(ADESeg, DEV, F, DataLoader, NUM_ADE, ade_train, ade_val, dim_of, feats, n_
                 g = val[j].to(DEV)
                 logits = lin(f).permute(0, 2, 1).contiguous().view(1, NUM_ADE, 14, 14)
                 up = F.interpolate(logits, size=(224, 224), mode="bilinear", align_corners=False).argmax(1)[0]
-                valid = g != 255
-                p, gg = up[valid], g[valid]
+                v = g != 255
+                p, gg = up[v], g[v]
                 cm += torch.bincount(p * NUM_ADE + gg, minlength=NUM_ADE * NUM_ADE).reshape(NUM_ADE, NUM_ADE).cpu()
         inter = torch.diag(cm).float()
         union = (cm.sum(0) + cm.sum(1) - torch.diag(cm)).float().clamp(min=1)
@@ -314,24 +286,23 @@ def _(ADESeg, DEV, F, DataLoader, NUM_ADE, ade_train, ade_val, dim_of, feats, n_
 
 
 @app.cell
-def _(mo, n_ade_train, n_ade_val, run_seg):
-    mo.md("Running ADE20K linear segmentation for both encoders...")
-    seg_lev = run_seg("levljepa", n_ade_train.value, n_ade_val.value)
-    seg_sig = run_seg("siglip", n_ade_train.value, n_ade_val.value)
+def _(MODELS, mo, n_ade_train, n_ade_val, run_seg):
+    mo.md("Running ADE20K linear segmentation for all encoders...")
+    seg = {m: run_seg(m, n_ade_train.value, n_ade_val.value) for m in MODELS}
+    rows = "\n".join(f"| {m} | {seg[m]:.2f} |" for m in MODELS)
     mo.md(
         f"""
-        **ADE20K linear mIoU (frozen patch tokens, subset of {n_ade_train.value} train / {n_ade_val.value} val):**
+        **ADE20K linear mIoU** (frozen patch tokens, subset
+        {n_ade_train.value} train / {n_ade_val.value} val):
 
         | Encoder | ADE20K mIoU |
         |---|---|
-        | LeVLJEPA | {seg_lev:.2f} |
-        | SigLIP | {seg_sig:.2f} |
-        | **LeVLJEPA - SigLIP** | **{seg_lev - seg_sig:+.2f}** |
+        {rows}
 
-        Paper (full Datacomp-L): LeVLJEPA 23.15, SigLIP 19.24.
+        Paper (full Datacomp-L): LeVLJEPA 23.15, InfoNCE 20.90, SigLIP 19.24.
         """
     )
-    return seg_lev, seg_sig
+    return (seg,)
 
 
 @app.cell
@@ -341,8 +312,7 @@ def _(mo):
 
 
 @app.cell
-def _(Path, os, tarfile, urllib):
-    import urllib.request as urlreq
+def _(Path, os, tarfile, urlreq):
     DATA = Path(os.environ.get("REPRO_DATA", "./data_repro"))
     DATA.mkdir(parents=True, exist_ok=True)
     root = DATA / "bg_challenge"
@@ -355,7 +325,7 @@ def _(Path, os, tarfile, urllib):
         with tarfile.open(tar, "r:gz") as t:
             t.extractall(DATA)
     "IN-9 release ready"
-    return DATA, root, urlreq
+    return DATA, root
 
 
 @app.cell
@@ -366,103 +336,93 @@ def _():
 
 
 @app.cell
-def _(Dataset, IM_MEAN, IM_STD, Image, IN9, transforms):
-    cls_tf = transforms.Compose(
-        [
-            transforms.Resize(256, interpolation=transforms.InterpolationMode.BICUBIC),
-            transforms.CenterCrop(224),
-            transforms.ToTensor(),
-            transforms.Normalize(IM_MEAN, IM_STD),
-        ]
-    )
+def _(Dataset, Image, IN9, transforms):
+    def cls_tf_for(norm):
+        mean, std = norm
+        return transforms.Compose(
+            [
+                transforms.Resize(256, interpolation=transforms.InterpolationMode.BICUBIC),
+                transforms.CenterCrop(224),
+                transforms.ToTensor(),
+                transforms.Normalize(mean, std),
+            ]
+        )
 
 
     class IN9(Dataset):
-        def __init__(self, root, split, limit_per_class=None):
+        def __init__(self, root, split, img_tf, limit_per_class=None):
             base = root / split / "val"
             self.items = []
             for ci, c in enumerate(IN9):
                 d = base / c
                 if not d.exists():
                     continue
-                files = sorted(d.iterdir())[:limit_per_class] if limit_per_class else sorted(d.iterdir())
+                files = sorted(d.iterdir())
+                if limit_per_class:
+                    files = files[:limit_per_class]
                 for f in files:
                     self.items.append((str(f), ci))
+            self.img_tf = img_tf
 
         def __len__(self):
             return len(self.items)
 
         def __getitem__(self, i):
             p, c = self.items[i]
-            return cls_tf(Image.open(p).convert("RGB")), c
-    return IN9, cls_tf
+            return self.img_tf(Image.open(p).convert("RGB")), c
+    return IN9, cls_tf_for
 
 
 @app.cell
-def _(DEV, F, IN9, DataLoader, feats, n_in9_per_class, nn, random, root, torch):
+def _(DEV, F, IN9, DataLoader, cls_tf_for, feats, n_in9_per_class, nn, norm_for, random, root, torch):
     def run_in9(name, npc):
-        orig = IN9(root, "original", npc)
-        msame = IN9(root, "mixed_same", npc)
-        mrand = IN9(root, "mixed_rand", npc)
-        # stratified 50/50 split of original for train/eval
+        tf = cls_tf_for(norm_for(name))
+        orig = IN9(root, "original", tf, npc)
+        msame = IN9(root, "mixed_same", tf, npc)
+        mrand = IN9(root, "mixed_rand", tf, npc)
         byc = {}
         for i in range(len(orig)):
-            _, ci = orig.items[i]
-            byc.setdefault(ci, []).append(i)
+            byc.setdefault(orig.items[i][1], []).append(i)
         rng = random.Random(0)
         tr, ev = [], []
         for ci, idxs in byc.items():
-            idxs = idxs[:]
-            rng.shuffle(idxs)
-            cut = len(idxs) // 2
-            tr.extend(idxs[:cut])
-            ev.extend(idxs[cut:])
+            idxs = idxs[:]; rng.shuffle(idxs); cut = len(idxs) // 2
+            tr.extend(idxs[:cut]); ev.extend(idxs[cut:])
 
         def sub(base, idxs):
-            d = IN9.__new__(IN9)
-            d.items = [base.items[i] for i in idxs]
+            d = IN9.__new__(IN9); d.items = [base.items[i] for i in idxs]; d.img_tf = base.img_tf
             return d
 
         def cache(ds):
             loader = DataLoader(ds, batch_size=128, shuffle=False, num_workers=4)
             fs, ls = [], []
             for img, lab in loader:
-                img = img.to(DEV)
-                c, _ = feats(name, img)
-                fs.append(c.cpu())
-                ls.append(lab)
+                c, _ = feats(name, img.to(DEV))
+                fs.append(c.cpu()); ls.append(lab)
             return F.normalize(torch.cat(fs, 0).float(), dim=-1), torch.cat(ls, 0)
 
         trf, trl = cache(sub(orig, tr))
         evf, evl = cache(sub(orig, ev))
         msf, msl = cache(msame)
         mrf, mrl = cache(mrand)
-        # standardize
-        mean = trf.mean(0)
-        std = trf.std(0).clamp(min=1e-8)
+        mean, std = trf.mean(0), trf.std(0).clamp(min=1e-8)
         nC = 9
         lin = nn.Linear(trf.shape[1], nC, bias=False).to(DEV)
         opt = torch.optim.AdamW(lin.parameters(), lr=0.1, weight_decay=1e-4)
         lf = nn.CrossEntropyLoss()
-        n = trf.shape[0]
-        idx = torch.arange(n)
+        n = trf.shape[0]; idx = torch.arange(n)
         for _ in range(50):
-            perm = idx[rng.sample(range(n), n)]
             for s in range(0, n, min(4096, n)):
-                b = perm[s:s + min(4096, n)]
-                f = ((trf[b] - mean) / std).to(DEV)
-                y = trl[b].to(DEV)
+                b = idx[rng.sample(range(n), n)][s:s + min(4096, n)]
+                f = ((trf[b] - mean) / std).to(DEV); y = trl[b].to(DEV)
                 loss = lf(lin(f), y)
-                opt.zero_grad()
-                loss.backward()
-                opt.step()
+                opt.zero_grad(); loss.backward(); opt.step()
         lin.eval()
 
         def acc(f, y):
-            f = ((f - mean) / std).to(DEV)
             with torch.no_grad():
-                p = lin(f).argmax(1)
-            return 100.0 * (p.cpu() == y).float().mean().item()
+                p = lin(((f - mean) / std).to(DEV)).argmax(1).cpu()
+            return 100.0 * (p == y).float().mean().item()
 
         ao, am, ar = acc(evf, evl), acc(msf, msl), acc(mrf, mrl)
         return {"Original": ao, "Mixed-Same": am, "Mixed-Rand": ar,
@@ -471,45 +431,45 @@ def _(DEV, F, IN9, DataLoader, feats, n_in9_per_class, nn, random, root, torch):
 
 
 @app.cell
-def _(mo, n_in9_per_class, run_in9):
-    mo.md("Running ImageNet-9 linear-probe robustness for both encoders...")
-    in9_lev = run_in9("levljepa", n_in9_per_class.value)
-    in9_sig = run_in9("siglip", n_in9_per_class.value)
+def _(MODELS, mo, n_in9_per_class, run_in9):
+    mo.md("Running ImageNet-9 linear-probe robustness for all encoders...")
+    in9 = {m: run_in9(m, n_in9_per_class.value) for m in MODELS}
+    rows = "\n".join(
+        f"| {m} | {in9[m]['Original']:.2f} | {in9[m]['Mixed-Same']:.2f} | "
+        f"{in9[m]['Mixed-Rand']:.2f} | {in9[m]['drop_ms']:.2f} | {in9[m]['drop_mr']:.2f} |"
+        for m in MODELS
+    )
     mo.md(
         f"""
-        **ImageNet-9 (linear probe on frozen CLS, subset of ~{n_in9_per_class.value}/class):**
+        **ImageNet-9** (linear probe on frozen CLS, subset ~{n_in9_per_class.value}/class):
 
         | Encoder | Original | Mixed-Same | Mixed-Rand | drop MS | drop MR |
         |---|---|---|---|---|---|
-        | LeVLJEPA | {in9_lev['Original']:.2f} | {in9_lev['Mixed-Same']:.2f} | {in9_lev['Mixed-Rand']:.2f} | {in9_lev['drop_ms']:.2f} | {in9_lev['drop_mr']:.2f} |
-        | SigLIP | {in9_sig['Original']:.2f} | {in9_sig['Mixed-Same']:.2f} | {in9_sig['Mixed-Rand']:.2f} | {in9_sig['drop_ms']:.2f} | {in9_sig['drop_mr']:.2f} |
+        {rows}
 
         Paper (full): LeVLJEPA 96.96/91.01/79.75 (drops 5.95/17.21),
-        SigLIP 96.44/89.41/78.35 (drops 7.03/18.09).
+        SigLIP 96.44/89.41/78.35 (7.03/18.09).
         """
     )
-    return in9_lev, in9_sig
+    return (in9,)
 
 
 @app.cell
-def _(in9_lev, in9_sig, mo, seg_lev, seg_sig):
+def _(in9, mo, seg):
     mo.md(
         f"""
         ## Verdict
 
-        At this reduced scale the two headline directions of the paper reproduce:
-
-        - **Dense features:** LeVLJEPA ({seg_lev:.2f}) > SigLIP ({seg_sig:.2f}) on
-          ADE20K linear segmentation.
-        - **Object-centricity:** LeVLJEPA's Mixed-Same/Mixed-Rand drops
-          ({in9_lev['drop_ms']:.2f} / {in9_lev['drop_mr']:.2f}) are no larger than
-          SigLIP's ({in9_sig['drop_ms']:.2f} / {in9_sig['drop_mr']:.2f}), and its
-          Original accuracy is higher.
-
-        Absolute numbers are below the paper because this notebook uses small
-        data subsets (and the SigLIP baseline is webli-trained, not the paper's
-        Datacomp-L SigLIP). Run `bash run_repro.sh` in the repo for the
-        full-scale numbers.
+        - **LeVLJEPA's own numbers** (ADE20K {seg['levljepa']:.2f} mIoU; IN-9
+          drops {in9['levljepa']['drop_ms']:.2f}/{in9['levljepa']['drop_mr']:.2f})
+          track the paper (23.15; 5.95/17.21) once each encoder is evaluated
+          under its **native** normalization and the linear-head output is
+          permuted to `(B,C,14,14)` before the loss.
+        - Against public SigLIP (WebLI) and OpenAI CLIP (WIT) the dense-feature
+          and robustness *advantages* reverse: those baselines are trained on
+          stronger datasets than Datacomp-L. The paper's matched-data baselines
+          are not public, so the objective-level comparison needs same-data
+          checkpoints. Full-scale numbers: `bash run_repro.sh` in the repo.
         """
     )
     return
