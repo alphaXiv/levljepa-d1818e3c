@@ -237,7 +237,7 @@ class ADESegDataset(Dataset):
         self.img_tf = img_tf
         self.lab_tf = transforms.Compose(
             [
-                transforms.Resize(256, interpolation=transforms.InterpolationMode.NEAREST),
+                transforms.Resize(224, interpolation=transforms.InterpolationMode.NEAREST),
                 transforms.CenterCrop(224),
             ]
         )
