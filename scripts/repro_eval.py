@@ -196,21 +196,17 @@ def seg_transform():
 def _detect_ade_convention(sample_labels):
     """Return (num_classes, void_value, label_is_one_indexed).
 
-    ADE20K scene parsing has 150 classes. Two common encodings:
-      A) ADEChallengeData2016 raw: 0 = void, classes 1..150 (max 150).
+    ADE20K scene parsing always has 150 classes. Two common encodings:
+      A) ADEChallengeData2016 raw: 0 = void, classes 1..150.
       B) remapped: classes 0..149, void = 255.
-    Detect decisively from whether 255 is present."""
+    We sample broadly to decide the encoding; num_classes is fixed at 150."""
     vals = set()
     for lab in sample_labels:
-        arr = np.array(lab, dtype=np.int64)
-        vals.update(np.unique(arr).tolist())
-        if len(vals) > 200:
-            break
+        vals.update(np.unique(np.array(lab, dtype=np.int64)).tolist())
     has_255 = 255 in vals
     if has_255:
-        rest = vals - {255}
-        return max(rest) + 1, 255, False
-    return max(vals), 0, True
+        return 150, 255, False
+    return 150, 0, True
 
 
 def _load_ade20k():
@@ -220,7 +216,7 @@ def _load_ade20k():
     ds = load_dataset("merve/scene_parse_150")
     train = ds["train"]
     val = ds["validation"]
-    sample = [train[i]["annotation"] for i in range(min(50, len(train)))]
+    sample = [train[i]["annotation"] for i in range(min(2000, len(train)))]
     num_classes, void, one_indexed = _detect_ade_convention(sample)
     print(
         f"[ade] train={len(train)} val={len(val)} num_classes={num_classes} "

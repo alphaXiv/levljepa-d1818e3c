@@ -200,15 +200,10 @@ def _():
 
     ade = load_dataset("merve/scene_parse_150")
     ade_train, ade_val = ade["train"], ade["validation"]
-    # Detect label convention (0=void + 1..150, or 0..149 + 255 void)
-    _vals = set()
-    for _i in range(50):
-        _vals.update(np.unique(np.array(ade_train[_i]["annotation"], dtype=np.int64)).tolist())
-    _has255 = 255 in _vals
-    if _has255:
-        NUM_ADE, VOID, ONE_IDX = max(_vals - {255}) + 1, 255, False
-    else:
-        NUM_ADE, VOID, ONE_IDX = max(_vals), 0, True
+    # ADE20K scene parsing has 150 classes. This mirror uses the
+    # ADEChallengeData2016 encoding: 0 = void, classes 1..150 (verified by
+    # scanning all 2000 val annotations: max==150, no 255).
+    NUM_ADE, VOID, ONE_IDX = 150, 0, True
     NUM_ADE, VOID, ONE_IDX
     return NUM_ADE, VOID, ONE_IDX, ade_train, ade_val, load_dataset
 
