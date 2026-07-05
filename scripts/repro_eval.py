@@ -15,8 +15,6 @@
 # ]
 #
 # [tool.uv]
-# required-environments = ["sys_platform == 'linux'"]
-#
 # [[tool.uv.index]]
 # name = "pytorch-cu128"
 # url = "https://download.pytorch.org/whl/cu128"
