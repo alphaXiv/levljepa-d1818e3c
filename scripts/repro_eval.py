@@ -333,6 +333,41 @@ def _downsample_labels_224(labels224, bs=512):
     return out
 
 
+def _ridge_seg(train_feats, train_lab14, val_feats, val_labels, mean, std,
+               num_classes, dev, ridge_lambda=1.0):
+    """Closed-form ridge linear probe (decisive test of whether the frozen patch
+    tokens are linearly segmentable). Solves W = (X^T X + lI)^-1 X^T Y over the
+    standardized, non-void training tokens, with void rows zeroed in Y."""
+    X = ((train_feats - mean) / std).reshape(-1, train_feats.shape[-1]).to(dev)
+    Y = torch.zeros(X.shape[0], num_classes, device=dev, dtype=torch.float32)
+    lab = train_lab14.reshape(-1).to(dev)
+    valid = lab != 255
+    Y[valid, lab[valid]] = 1.0
+    XtX = X.t() @ X
+    XtY = X.t() @ Y
+    W = torch.linalg.solve(
+        XtX + ridge_lambda * torch.eye(num_classes if False else X.shape[1], device=dev),
+        XtY,
+    )  # (D, C)
+    # eval
+    cm = torch.zeros(num_classes, num_classes, dtype=torch.long)
+    bs = 256
+    with torch.no_grad():
+        for s in range(0, val_feats.shape[0], bs):
+            f = ((val_feats[s:s + bs] - mean) / std).to(dev)
+            labs = val_labels[s:s + bs].to(dev)
+            logits = (f @ W).view(-1, num_classes, 14, 14)
+            up = F.interpolate(logits, size=(224, 224), mode="bilinear", align_corners=False).argmax(1)
+            p = up.reshape(-1); g = labs.reshape(-1)
+            v = g != 255
+            p, g = p[v], g[v]
+            cm += torch.bincount(p * num_classes + g, minlength=num_classes * num_classes).reshape(num_classes, num_classes).cpu()
+    inter = torch.diag(cm).float()
+    union = (cm.sum(0) + cm.sum(1) - torch.diag(cm)).float().clamp(min=1)
+    present = (cm.sum(0) + cm.sum(1) - torch.diag(cm)) > 0
+    return (inter / union)[present].mean().item() * 100
+
+
 def train_linear_seg(name, enc, dev, seg_epochs=30, seg_lr=1e-2, seg_bs=256):
     train_split, val_split, num_classes, void, one_idx = _load_ade20k()
     train_ds = ADESegDataset(train_split, seg_transform(), num_classes, void, one_idx)
@@ -365,6 +400,12 @@ def train_linear_seg(name, enc, dev, seg_epochs=30, seg_lr=1e-2, seg_bs=256):
         f"{(train_lab14.view(-1).bincount(minlength=num_classes) > 0).sum().item()}",
         flush=True,
     )
+
+    # Closed-form ridge probe: decisive diagnostic of linear segmentability.
+    ridge_miou = _ridge_seg(
+        train_feats, train_lab14, val_feats, val_labels, mean, std, num_classes, dev
+    )
+    print(f"[seg] {name} RIDGE mIoU={ridge_miou:.2f} (closed-form probe)", flush=True)
 
     linear = nn.Linear(D, num_classes, bias=True).to(dev)
     opt = torch.optim.AdamW(linear.parameters(), lr=seg_lr, weight_decay=0.0)
