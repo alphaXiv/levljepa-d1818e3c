@@ -151,9 +151,11 @@ def forward_features(name, enc, images):
             patches = feats
         return cls.float(), patches.float()
     if name == "siglip":
-        out = enc(pixel_values=images).last_hidden_state  # (B, 1+196, D)
-        cls = out[:, 0]
-        patches = out[:, 1:]
+        out = senc(pixel_values=images).last_hidden_state  # (B, 196, D)
+        # SigLIP has NO cls token: all 196 entries are patch tokens; the global
+        # feature is their mean (SigLIP pools by average, not by a class token).
+        cls = out.mean(dim=1)
+        patches = out
         return cls.float(), patches.float()
     raise ValueError(name)
 
