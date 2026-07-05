@@ -1,0 +1,107 @@
+defaults:
+  - model: base
+  - _self_
+
+# LeVLJEPA: single-view, non-contrastive vision-language pretraining.
+# Image and text embeddings predict each other's stop-gradient target through
+# modality-specific MLP predictors; per-modality SIGReg prevents collapse.
+align_loss: mse             # mse | cosine (cosine = BYOL-style normalized, hypersphere)
+
+run_name: levljepa_run
+wandb_project: LeVLJEPA
+wandb_enabled: true
+trainer_log_every_n_steps: 50
+metrics_every_n_steps: 50
+matmul_precision: high
+spt_disable_checkpoint_callbacks: true
+spt_requeue_checkpoint: false
+spt_progress_bar: simple
+
+batch_size: 256
+total_steps: 50000
+lr: 2e-4
+weight_decay: 0.01
+max_grad_norm: 1.0
+warmup_steps: 1000
+eta_min: 2e-5
+
+# LR schedule: "cosine" (warmup -> cosine to eta_min over the whole run) or
+# "wsd" (warmup -> constant hold at peak lr -> short cosine decay to eta_min over
+# the final wsd_decay_frac of training). WSD avoids the long low-LR cosine tail
+# where the predictive objective overfits and eval drifts down.
+lr_schedule: cosine
+wsd_decay_frac: 0.15      # fraction of total_steps spent in the final decay
+wsd_decay_steps: 0        # explicit decay length; >0 overrides wsd_decay_frac
+warmup_start_factor: 0.01
+
+# SIGReg regularization weight per modality (the cross-modal prediction term
+# gets weight 1 - lambda_vision - lambda_text).
+lambda_vision: 0.02
+lambda_text: 0.02
+
+sigreg_distributed: false
+sigreg_num_proj: 4096
+
+# Pre-projection MLP: maps the LayerNormed CLS token into the SIGReg'd embedding
+# space, restoring variance LayerNorm suppresses.
+pre_proj_width: 2048
+pre_proj_depth: 1
+pre_proj_hidden_dims: null
+
+# Cross-modal predictor MLP (one per modality).
+projector_width: 2048
+projector_depth: 4
+projector_hidden_dims: null
+predictor_dropout: 0.0
+
+devices: 1
+num_nodes: 1
+accelerator: gpu
+num_workers: 4
+dataloader_timeout: 120
+ckpt_path: null
+resume_weights_only: false
+lance_path: /path/to/cc12m/train.lance
+lance_image_column: image
+lance_text_column: text
+lance_read_mode: scan          # scan | take
+lance_scan_batch_size: 2048
+lance_shuffle_buffer_size: 128
+lance_batch_readahead: 4
+lance_fragment_readahead: 2
+lance_scan_in_order: true
+image_size: 224
+image_augmentation: standard   # resize | standard
+image_crop_scale: [0.8, 1.0]
+image_crop_ratio: [0.75, 1.3333333333333333]
+image_color_jitter: [0.2, 0.2, 0.2, 0.02]  # brightness, contrast, saturation, hue
+image_color_jitter_prob: 0.3
+image_grayscale_prob: 0.05
+image_gaussian_blur_prob: 0.0
+image_random_erasing_prob: 0.0
+max_text_length: 77
+text_readout: eot              # eot | pad77
+max_samples: null
+
+save_every_n_steps: 5000
+full_checkpoint_every_n_steps: 0
+eval_every_n_steps: 5000
+
+# Online attentive probe: an AttentiveClassifier trained on ImageNet-train patch
+# tokens (frozen backbone) during pretraining; val top-1/top-5 logged at each
+# eval_every_n_steps alongside the zero-shot metrics.
+online_attentive_probe: true
+probe_every_n_steps: 1      # probe optimizer steps per training step
+probe_batch_size: 256       # ImageNet batch for the probe (defaults to batch_size)
+probe_depth: 1              # attentive pooler depth
+probe_lr: 1e-3
+probe_weight_decay: 1e-4
+probe_num_classes: 1000
+
+output_dir: /path/to/outputs
+cache_dir: /path/to/data
+hf_bucket: your-hf-org/your-bucket
+
+hydra:
+  run:
+    dir: .

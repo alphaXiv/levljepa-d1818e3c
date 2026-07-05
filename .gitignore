@@ -1,0 +1,15 @@
+.hydra/
+.venv/
+__pycache__/
+*/__pycache__/
+*.pyc
+
+logs/*
+!logs/.gitkeep
+wandb/
+wandb_resume.json
+
+main.log
+environment*.json
+requirements_frozen*.txt
+.runcwd/
