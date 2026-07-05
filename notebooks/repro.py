@@ -242,7 +242,7 @@ def _(ADESeg, DEV, F, DataLoader, NUM_ADE, ade_train, ade_val, dim_of, feats, no
         D = dim_of(name)
 
         def cache(ds):
-            loader = DataLoader(ds, batch_size=64, shuffle=False, num_workers=4)
+            loader = DataLoader(ds, batch_size=64, shuffle=False, num_workers=0)
             fs, ls = [], []
             for img, lab in loader:
                 _, p = feats(name, img.to(DEV))
@@ -396,7 +396,7 @@ def _(DEV, F, IN9, DataLoader, cls_tf_for, feats, n_in9_per_class, nn, norm_for,
             return d
 
         def cache(ds):
-            loader = DataLoader(ds, batch_size=128, shuffle=False, num_workers=4)
+            loader = DataLoader(ds, batch_size=128, shuffle=False, num_workers=0)
             fs, ls = [], []
             for img, lab in loader:
                 c, _ = feats(name, img.to(DEV))
