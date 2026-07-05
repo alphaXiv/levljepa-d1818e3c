@@ -287,7 +287,7 @@ def _(ADESeg, DEV, F, DataLoader, NUM_ADE, ade_train, ade_val, dim_of, feats, n_
                 b = perm[s:s + 128]
                 f = ((trf[b] - mean) / std).to(DEV)
                 l = trl14[b].to(DEV)
-                logits = lin(f).view(-1, NUM_ADE, 14, 14)
+                logits = lin(f).permute(0, 2, 1).contiguous().view(-1, NUM_ADE, 14, 14)
                 loss = lossf(logits, l)
                 opt.zero_grad()
                 loss.backward()
@@ -300,7 +300,7 @@ def _(ADESeg, DEV, F, DataLoader, NUM_ADE, ade_train, ade_val, dim_of, feats, n_
             for j in range(vaf.shape[0]):
                 f = ((vaf[j:j + 1] - mean) / std).to(DEV)
                 g = val[j].to(DEV)
-                logits = lin(f).view(1, NUM_ADE, 14, 14)
+                logits = lin(f).permute(0, 2, 1).contiguous().view(1, NUM_ADE, 14, 14)
                 up = F.interpolate(logits, size=(224, 224), mode="bilinear", align_corners=False).argmax(1)[0]
                 valid = g != 255
                 p, gg = up[valid], g[valid]

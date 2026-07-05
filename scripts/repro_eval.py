@@ -322,7 +322,7 @@ def _eval_seg_miou(linear, feats, labels, mean, std, num_classes, dev, bs=128):
         for s in range(0, n, bs):
             f = ((feats[s:s + bs] - mean) / std).to(dev)  # (b,196,D)
             labs = labels[s:s + bs].to(dev)  # (b,224,224)
-            logits = linear(f).view(-1, num_classes, 14, 14)
+            logits = linear(f).permute(0, 2, 1).contiguous().view(-1, num_classes, 14, 14)
             up = F.interpolate(logits, size=(224, 224), mode="bilinear", align_corners=False).argmax(1)
             p = up.reshape(-1)
             g = labs.reshape(-1)
@@ -371,7 +371,7 @@ def _ridge_seg(train_feats, train_lab14, val_feats, val_labels, mean, std,
         for s in range(0, val_feats.shape[0], bs):
             f = ((val_feats[s:s + bs] - mean) / std).to(dev)
             labs = val_labels[s:s + bs].to(dev)
-            logits = (f @ W).view(-1, num_classes, 14, 14)
+            logits = (f @ W).permute(0, 2, 1).contiguous().view(-1, num_classes, 14, 14)
             up = F.interpolate(logits, size=(224, 224), mode="bilinear", align_corners=False).argmax(1)
             p = up.reshape(-1); g = labs.reshape(-1)
             v = g != 255
@@ -436,7 +436,7 @@ def train_linear_seg(name, enc, dev, seg_epochs=30, seg_lr=1e-2, seg_bs=256):
             bidx = perm[s:s + seg_bs]
             f = ((train_feats[bidx] - mean) / std).to(dev, non_blocking=True)
             lab = train_lab14[bidx].to(dev, non_blocking=True)
-            logits = linear(f).view(-1, num_classes, 14, 14)
+            logits = linear(f).permute(0, 2, 1).contiguous().view(-1, num_classes, 14, 14)
             loss = loss_fn(logits, lab)
             opt.zero_grad()
             loss.backward()
