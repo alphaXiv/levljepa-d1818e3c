@@ -318,38 +318,37 @@ def _(mo):
 
 @app.cell
 def _(ADESeg, DEV, F, Image, MODELS, NUM_ADE, ade_val, feats, mo, n_ade_val, np, seg, torch):
-    import matplotlib.pyplot as plt
-    from matplotlib.colors import ListedColormap
+    import matplotlib.pyplot as _plt
+    from matplotlib.colors import ListedColormap as _LCM
 
-    rng = np.random.default_rng(0)
-    idxs = rng.choice(n_ade_val, size=4, replace=False)
-    raw = [ade_val[int(i)] for i in idxs]
+    _rng = np.random.default_rng(0)
+    _idxs = _rng.choice(n_ade_val, size=4, replace=False)
+    _raw = [ade_val[int(i)] for i in _idxs]
 
-    cmap = ListedColormap(np.random.default_rng(1).random((NUM_ADE, 3)))
-    names = ["GT"] + MODELS
-    fig, axes = plt.subplots(len(raw), 1 + len(MODELS), figsize=(2.4 * (1 + len(MODELS)), 2.4 * len(raw)))
-    if len(raw) == 1:
-        axes = axes[None, :]
-    for r, ex in enumerate(raw):
-        gt = ex["annotation"].convert("L").resize((224, 224), Image.NEAREST)
-        gt_arr = np.array(gt, dtype=np.int64)
-        gt_arr = np.where(gt_arr == 0, 255, gt_arr - 1)
-        axes[r, 0].imshow(gt_arr, cmap=cmap, vmin=0, vmax=NUM_ADE - 1, interpolation="nearest")
-        axes[r, 0].set_title("GT", fontsize=9)
-        axes[r, 0].axis("off")
-        for ci, m in enumerate(MODELS):
-            tf = seg[m]["tf"]
-            img = tf(ex["image"].convert("RGB")).unsqueeze(0).to(DEV)
+    _cmap = _LCM(np.random.default_rng(1).random((NUM_ADE, 3)))
+    _fig, _axes = _plt.subplots(len(_raw), 1 + len(MODELS), figsize=(2.4 * (1 + len(MODELS)), 2.4 * len(_raw)))
+    if len(_raw) == 1:
+        _axes = _axes[None, :]
+    for _r, _ex in enumerate(_raw):
+        _gt = _ex["annotation"].convert("L").resize((224, 224), Image.NEAREST)
+        _gt_arr = np.array(_gt, dtype=np.int64)
+        _gt_arr = np.where(_gt_arr == 0, 255, _gt_arr - 1)
+        _axes[_r, 0].imshow(_gt_arr, cmap=_cmap, vmin=0, vmax=NUM_ADE - 1, interpolation="nearest")
+        _axes[_r, 0].set_title("GT", fontsize=9)
+        _axes[_r, 0].axis("off")
+        for _ci, _m in enumerate(MODELS):
+            _tf = seg[_m]["tf"]
+            _img = _tf(_ex["image"].convert("RGB")).unsqueeze(0).to(DEV)
             with torch.no_grad():
-                _, p = feats(m, img)
-            f = ((p - seg[m]["mean"]) / seg[m]["std"]).to(DEV)
-            logits = seg[m]["lin"](f).permute(0, 2, 1).contiguous().view(1, NUM_ADE, 14, 14)
-            up = F.interpolate(logits, size=(224, 224), mode="bilinear", align_corners=False).argmax(1)[0].cpu().numpy()
-            axes[r, ci + 1].imshow(up, cmap=cmap, vmin=0, vmax=NUM_ADE - 1, interpolation="nearest")
-            axes[r, ci + 1].set_title(f"{m}\n{seg[m]['mIoU']:.1f}", fontsize=8)
-            axes[r, ci + 1].axis("off")
-    plt.tight_layout()
-    mo.mpl.interactive(fig)
+                _, _p = feats(_m, _img)
+            _f = ((_p - seg[_m]["mean"]) / seg[_m]["std"]).to(DEV)
+            _logits = seg[_m]["lin"](_f).permute(0, 2, 1).contiguous().view(1, NUM_ADE, 14, 14)
+            _up = F.interpolate(_logits, size=(224, 224), mode="bilinear", align_corners=False).argmax(1)[0].cpu().numpy()
+            _axes[_r, _ci + 1].imshow(_up, cmap=_cmap, vmin=0, vmax=NUM_ADE - 1, interpolation="nearest")
+            _axes[_r, _ci + 1].set_title(f"{_m}\n{seg[_m]['mIoU']:.1f}", fontsize=8)
+            _axes[_r, _ci + 1].axis("off")
+    _plt.tight_layout()
+    mo.mpl.interactive(_fig)
     return
 
 
@@ -510,25 +509,25 @@ def _(mo):
 
 @app.cell
 def _(IN9, MODELS, Image, in9, mo, root):
-    import matplotlib.pyplot as plt
-    import numpy as np
+    import matplotlib.pyplot as _plt
+    import numpy as _np
 
-    x = np.arange(len(MODELS))
-    w = 0.38
-    ms = [in9[m]["drop_ms"] for m in MODELS]
-    mr = [in9[m]["drop_mr"] for m in MODELS]
-    fig, ax = plt.subplots(figsize=(7, 3.6))
-    ax.bar(x - w / 2, ms, w, label="drop Mixed-Same", color="#4C72B0")
-    ax.bar(x + w / 2, mr, w, label="drop Mixed-Rand", color="#DD8452")
-    ax.set_xticks(x); ax.set_xticklabels(MODELS, fontsize=9)
-    ax.set_ylabel("Accuracy drop (pp)"); ax.legend(fontsize=8)
-    ax.set_title("IN-9 background-shift drops (larger = more object-centric on MR)")
-    for i, v in enumerate(ms):
-        ax.text(i - w / 2, v + 0.15, f"{v:.1f}", ha="center", fontsize=7)
-    for i, v in enumerate(mr):
-        ax.text(i + w / 2, v + 0.15, f"{v:.1f}", ha="center", fontsize=7)
-    plt.tight_layout()
-    mo.mpl.interactive(fig)
+    _x = _np.arange(len(MODELS))
+    _w = 0.38
+    _ms = [in9[m]["drop_ms"] for m in MODELS]
+    _mr = [in9[m]["drop_mr"] for m in MODELS]
+    _fig, _ax = _plt.subplots(figsize=(7, 3.6))
+    _ax.bar(_x - _w / 2, _ms, _w, label="drop Mixed-Same", color="#4C72B0")
+    _ax.bar(_x + _w / 2, _mr, _w, label="drop Mixed-Rand", color="#DD8452")
+    _ax.set_xticks(_x); _ax.set_xticklabels(MODELS, fontsize=9)
+    _ax.set_ylabel("Accuracy drop (pp)"); _ax.legend(fontsize=8)
+    _ax.set_title("IN-9 background-shift drops (larger MR = more object-centric)")
+    for _i, _v in enumerate(_ms):
+        _ax.text(_i - _w / 2, _v + 0.15, f"{_v:.1f}", ha="center", fontsize=7)
+    for _i, _v in enumerate(_mr):
+        _ax.text(_i + _w / 2, _v + 0.15, f"{_v:.1f}", ha="center", fontsize=7)
+    _plt.tight_layout()
+    mo.mpl.interactive(_fig)
     return
 
 
@@ -540,25 +539,25 @@ def _(mo):
 
 @app.cell
 def _(Image, IN9, MODELS, mo, np, root, transforms):
-    import matplotlib.pyplot as plt
+    import matplotlib.pyplot as _plt
 
-    cls_tf = transforms.Compose([
+    _cls_tf = transforms.Compose([
         transforms.Resize(256, interpolation=transforms.InterpolationMode.BICUBIC),
         transforms.CenterCrop(224),
         transforms.ToTensor(),
     ])
-    splits = ["original", "mixed_same", "mixed_rand"]
-    fig, axes = plt.subplots(1, 3, figsize=(8, 3))
-    for c, sp in enumerate(splits):
-        ds = IN9(root, sp, cls_tf, limit_per_class=1)
-        if len(ds) == 0:
-            axes[c].axis("off"); continue
-        img, lab = ds[0]
-        axes[c].imshow(img.permute(1, 2, 0).numpy())
-        axes[c].set_title(f"{sp}\n(cls {lab})", fontsize=9)
-        axes[c].axis("off")
-    plt.tight_layout()
-    mo.mpl.interactive(fig)
+    _splits = ["original", "mixed_same", "mixed_rand"]
+    _fig, _axes = _plt.subplots(1, 3, figsize=(8, 3))
+    for _c, _sp in enumerate(_splits):
+        _ds = IN9(root, _sp, _cls_tf, limit_per_class=1)
+        if len(_ds) == 0:
+            _axes[_c].axis("off"); continue
+        _img, _lab = _ds[0]
+        _axes[_c].imshow(_img.permute(1, 2, 0).numpy())
+        _axes[_c].set_title(f"{_sp}\n(cls {_lab})", fontsize=9)
+        _axes[_c].axis("off")
+    _plt.tight_layout()
+    mo.mpl.interactive(_fig)
     return
 
 
