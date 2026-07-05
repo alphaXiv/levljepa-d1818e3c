@@ -163,27 +163,42 @@ def forward_features(name, enc, images):
 # -----------------------------------------------------------------------------
 
 
-def cls_transform():
+def _norm_for(name):
+    """Each encoder's native training normalization. The released LeVLJEPA
+    checkpoint was trained (and is evaluated in the repo) with CLIP stats; using
+    ImageNet stats produces degenerate patch features. SigLIP uses (0.5,0.5,0.5).
+    Evaluating each model under its own norm is the fair 'what dense features
+    does this objective produce' comparison."""
+    if name == "levljepa":
+        return CLIP_MEAN, CLIP_STD
+    if name == "siglip":
+        return (0.5, 0.5, 0.5), (0.5, 0.5, 0.5)
+    raise ValueError(name)
+
+
+def cls_transform(norm):
     """Paper linear-probe input: resize shortest side to 256, center-crop 224,
-    ImageNet normalization."""
+    with the model's native normalization."""
+    mean, std = norm
     return transforms.Compose(
         [
             transforms.Resize(256, interpolation=transforms.InterpolationMode.BICUBIC),
             transforms.CenterCrop(224),
             transforms.ToTensor(),
-            transforms.Normalize(IM_MEAN, IM_STD),
+            transforms.Normalize(mean, std),
         ]
     )
 
 
-def seg_transform():
-    """Square 224 input for the 14x14 patch grid (ImageNet normalization)."""
+def seg_transform(norm):
+    """Square 224 input for the 14x14 patch grid, native normalization."""
+    mean, std = norm
     return transforms.Compose(
         [
             transforms.Resize(224, interpolation=transforms.InterpolationMode.BICUBIC),
             transforms.CenterCrop(224),
             transforms.ToTensor(),
-            transforms.Normalize(IM_MEAN, IM_STD),
+            transforms.Normalize(mean, std),
         ]
     )
 
@@ -370,8 +385,9 @@ def _ridge_seg(train_feats, train_lab14, val_feats, val_labels, mean, std,
 
 def train_linear_seg(name, enc, dev, seg_epochs=30, seg_lr=1e-2, seg_bs=256):
     train_split, val_split, num_classes, void, one_idx = _load_ade20k()
-    train_ds = ADESegDataset(train_split, seg_transform(), num_classes, void, one_idx)
-    val_ds = ADESegDataset(val_split, seg_transform(), num_classes, void, one_idx)
+    norm = _norm_for(name)
+    train_ds = ADESegDataset(train_split, seg_transform(norm), num_classes, void, one_idx)
+    val_ds = ADESegDataset(val_split, seg_transform(norm), num_classes, void, one_idx)
     D = enc.embed_dim if name == "levljepa" else enc.config.hidden_size
     train_feats, train_labels = _cache_seg_features(name, enc, train_ds, dev, "train")
     val_feats, val_labels = _cache_seg_features(name, enc, val_ds, dev, "val")
@@ -569,7 +585,7 @@ def _eval_linear_cls(linear, mean, std, feats, labels, dev, bs=4096):
 
 def eval_in9(name, enc, dev):
     root = _ensure_in9()
-    tf = cls_transform()
+    tf = cls_transform(_norm_for(name))
     orig = IN9Dataset(root, "original", tf)
     msame = IN9Dataset(root, "mixed_same", tf)
     mrand = IN9Dataset(root, "mixed_rand", tf)
