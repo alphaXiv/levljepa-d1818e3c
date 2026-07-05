@@ -119,8 +119,8 @@ def _(DEV, LEVLJEPA_HF, torch):
         {k[8:]: v for k, v in vw.items() if k.startswith("encoder.")}, strict=True
     )
     enc.to(DEV).eval()
-    for p in enc.parameters():
-        p.requires_grad = False
+    for _p in enc.parameters():
+        _p.requires_grad = False
     "LeVLJEPA loaded"
     return enc, timm, load_file, hf_hub_download
 
@@ -131,8 +131,8 @@ def _(DEV, SIGLIP_HF, torch):
 
     senc = SiglipVisionModel.from_pretrained(SIGLIP_HF)
     senc.to(DEV).eval()
-    for p in senc.parameters():
-        p.requires_grad = False
+    for _p in senc.parameters():
+        _p.requires_grad = False
     "SigLIP loaded"
     return SiglipVisionModel, senc
 
@@ -143,8 +143,8 @@ def _(CLIP_HF, DEV, torch):
 
     cenc = CLIPVisionModel.from_pretrained(CLIP_HF)
     cenc.to(DEV).eval()
-    for p in cenc.parameters():
-        p.requires_grad = False
+    for _p in cenc.parameters():
+        _p.requires_grad = False
     "OpenAI CLIP loaded"
     return CLIPVisionModel, cenc
 
@@ -289,7 +289,7 @@ def _(ADESeg, DEV, F, DataLoader, NUM_ADE, ade_train, ade_val, dim_of, feats, no
 def _(MODELS, mo, n_ade_train, n_ade_val, run_seg):
     mo.md("Running ADE20K linear segmentation for all encoders...")
     seg = {m: run_seg(m, n_ade_train.value, n_ade_val.value) for m in MODELS}
-    rows = "\n".join(f"| {m} | {seg[m]:.2f} |" for m in MODELS)
+    _seg_rows = "\n".join(f"| {m} | {seg[m]:.2f} |" for m in MODELS)
     mo.md(
         f"""
         **ADE20K linear mIoU** (frozen patch tokens, subset
@@ -297,7 +297,7 @@ def _(MODELS, mo, n_ade_train, n_ade_val, run_seg):
 
         | Encoder | ADE20K mIoU |
         |---|---|
-        {rows}
+        {_seg_rows}
 
         Paper (full Datacomp-L): LeVLJEPA 23.15, InfoNCE 20.90, SigLIP 19.24.
         """
@@ -330,7 +330,7 @@ def _(Path, os, tarfile, urlreq):
 
 @app.cell
 def _():
-    IN9 = ["00_dog", "01_bird", "02_wheeled vehicle", "03_reptile", "04_carnivore",
+    IN9_CLASSES = ["00_dog", "01_bird", "02_wheeled vehicle", "03_reptile", "04_carnivore",
            "05_insect", "06_musical instrument", "07_primate", "08_fish"]
     return (IN9,)
 
@@ -353,7 +353,7 @@ def _(Dataset, Image, IN9, transforms):
         def __init__(self, root, split, img_tf, limit_per_class=None):
             base = root / split / "val"
             self.items = []
-            for ci, c in enumerate(IN9):
+            for ci, c in enumerate(IN9_CLASSES):
                 d = base / c
                 if not d.exists():
                     continue
@@ -434,7 +434,7 @@ def _(DEV, F, IN9, DataLoader, cls_tf_for, feats, n_in9_per_class, nn, norm_for,
 def _(MODELS, mo, n_in9_per_class, run_in9):
     mo.md("Running ImageNet-9 linear-probe robustness for all encoders...")
     in9 = {m: run_in9(m, n_in9_per_class.value) for m in MODELS}
-    rows = "\n".join(
+    _in9_rows = "\n".join(
         f"| {m} | {in9[m]['Original']:.2f} | {in9[m]['Mixed-Same']:.2f} | "
         f"{in9[m]['Mixed-Rand']:.2f} | {in9[m]['drop_ms']:.2f} | {in9[m]['drop_mr']:.2f} |"
         for m in MODELS
@@ -445,7 +445,7 @@ def _(MODELS, mo, n_in9_per_class, run_in9):
 
         | Encoder | Original | Mixed-Same | Mixed-Rand | drop MS | drop MR |
         |---|---|---|---|---|---|
-        {rows}
+        {_in9_rows}
 
         Paper (full): LeVLJEPA 96.96/91.01/79.75 (drops 5.95/17.21),
         SigLIP 96.44/89.41/78.35 (7.03/18.09).
