@@ -258,6 +258,12 @@ class ADESegDataset(Dataset):
         return img, label
 
 
+def _seg_collate(batch):
+    imgs = torch.stack([b[0] for b in batch], 0)
+    labs = [b[1] for b in batch]
+    return imgs, labs
+
+
 @torch.no_grad()
 def _cache_seg_features(name, enc, dataset, dev, tag, bs=128):
     """Precompute (patch features [N,196,D], label maps list) to disk."""
@@ -267,7 +273,8 @@ def _cache_seg_features(name, enc, dataset, dev, tag, bs=128):
         data = torch.load(feat_path, map_location="cpu", weights_only=False)
         return data["feats"], data["labels"]
     loader = DataLoader(
-        dataset, batch_size=bs, shuffle=False, num_workers=8, pin_memory=True
+        dataset, batch_size=bs, shuffle=False, num_workers=8, pin_memory=True,
+        collate_fn=_seg_collate,
     )
     feats = []
     labels = []
@@ -275,15 +282,10 @@ def _cache_seg_features(name, enc, dataset, dev, tag, bs=128):
         imgs = imgs.to(dev, non_blocking=True)
         _, patches = forward_features(name, enc, imgs)  # (B,196,D)
         feats.append(patches.cpu())
-        labels.append(labs)  # list of (B,H,W) batches (varying resolution)
+        labels.extend(labs)  # labs is already a list of (H,W) tensors
     feats = torch.cat(feats, 0)  # (N,196,D)
-    # labels per-sample have varying resolution -> store as a flat list
-    lab_list = []
-    for batch in labels:
-        for i in range(batch.shape[0]):
-            lab_list.append(batch[i])
-    torch.save({"feats": feats, "labels": lab_list}, feat_path)
-    return feats, lab_list
+    torch.save({"feats": feats, "labels": labels}, feat_path)
+    return feats, labels
 
 
 def _eval_seg_miou(linear, feats, labels, num_classes, dev, bs=256):
