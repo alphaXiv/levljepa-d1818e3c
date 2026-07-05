@@ -287,8 +287,7 @@ def _cache_seg_features(name, enc, dataset, dev, tag, bs=128):
 def _eval_seg_miou(linear, feats, labels, num_classes, dev, bs=256):
     """Train linear head is already done; evaluate mIoU on held-out features."""
     linear.eval()
-    inter = torch.zeros(num_classes, dtype=torch.long)
-    union = torch.zeros(num_classes, dtype=torch.long)
+    cm = torch.zeros(num_classes, num_classes, dtype=torch.long)
     n = feats.shape[0]
     with torch.no_grad():
         for s in range(0, n, bs):
@@ -299,28 +298,39 @@ def _eval_seg_miou(linear, feats, labels, num_classes, dev, bs=256):
             logits = logits.view(b, num_classes, 14, 14)
             preds = logits.argmax(1)  # (b,14,14)
             for j in range(b):
-                gt = lab[j]
+                gt = lab[j]  # CPU (H,W)
                 gh, gw = gt.shape
                 pred = F.interpolate(
                     preds[j:j + 1].unsqueeze(1).float(),
                     size=(gh, gw),
                     mode="bilinear",
                     align_corners=False,
-                )[0, 0].round().long()
+                )[0, 0].round().long().cpu()
                 g = gt
                 valid = g != 255
-                p = pred[valid]
-                g = g[valid]
-                for c in range(num_classes):
-                    pc = p == c
-                    gc = g == c
-                    inter[c] += (pc & gc).sum()
-                    union[c] += (pc | gc).sum()
-    iou = inter.float() / union.float().clamp(min=1)
-    miou = (inter.float() / union.float().clamp(min=1))
-    present = union > 0
-    miou = miou[present].mean().item() * 100
-    return miou
+                p = pred[valid].to(torch.long)
+                g = g[valid].to(torch.long)
+                cm += torch.bincount(
+                    p * num_classes + g, minlength=num_classes * num_classes
+                ).reshape(num_classes, num_classes)
+    inter = torch.diag(cm).float()
+    union = (cm.sum(0) + cm.sum(1) - torch.diag(cm)).float().clamp(min=1)
+    iou = inter / union
+    present = (cm.sum(0) + cm.sum(1) - torch.diag(cm)) > 0
+    return iou[present].mean().item() * 100
+
+
+def _downsample_labels(labels, num_classes):
+    """Precompute 14x14 downsampled labels (nearest) for training the linear
+    head; done once so per-epoch loops are cheap."""
+    out = []
+    for lab in labels:
+        out.append(
+            F.interpolate(
+                lab.unsqueeze(0).unsqueeze(0).float(), size=(14, 14), mode="nearest"
+            )[0, 0].long()
+        )
+    return torch.stack(out, 0)  # (N,14,14)
 
 
 def train_linear_seg(name, enc, dev, seg_epochs=30, seg_lr=1e-3, seg_bs=64):
@@ -336,6 +346,7 @@ def train_linear_seg(name, enc, dev, seg_epochs=30, seg_lr=1e-3, seg_bs=64):
     linear = nn.Linear(D, num_classes, bias=False).to(dev)
     opt = torch.optim.AdamW(linear.parameters(), lr=seg_lr, weight_decay=0.0)
     loss_fn = nn.CrossEntropyLoss(ignore_index=255)
+    train_lab14 = _downsample_labels(train_labels, num_classes).pin_memory()
     n = train_feats.shape[0]
     idx = torch.arange(n)
     rng = random.Random(0)
@@ -345,18 +356,8 @@ def train_linear_seg(name, enc, dev, seg_epochs=30, seg_lr=1e-3, seg_bs=64):
         total = 0.0
         for s in range(0, n, seg_bs):
             bidx = perm[s:s + seg_bs]
-            f = train_feats[bidx].to(dev)  # (b,196,D)
-            lab = torch.stack(
-                [
-                    F.interpolate(
-                        train_labels[i].unsqueeze(0).unsqueeze(0).float(),
-                        size=(14, 14),
-                        mode="nearest",
-                    )[0, 0].long()
-                    for i in bidx.tolist()
-                ],
-                0,
-            )  # (b,14,14)
+            f = train_feats[bidx].to(dev, non_blocking=True)  # (b,196,D)
+            lab = train_lab14[bidx].to(dev, non_blocking=True)  # (b,14,14)
             logits = linear(f).view(-1, num_classes, 14, 14)
             loss = loss_fn(logits, lab)
             opt.zero_grad()
