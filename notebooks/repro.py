@@ -81,10 +81,12 @@ def _():
 
 
 @app.cell
-def _(mo):
-    n_ade_train = mo.slider(64, 4000, value=600, label="ADE20K train images")
-    n_ade_val = mo.slider(32, 1000, value=200, label="ADE20K val images")
-    n_in9_per_class = mo.slider(20, 200, value=60, label="IN-9 images per class")
+def _():
+    # Subset sizes (edit here or in `marimo edit`). Kept small so the notebook
+    # runs in minutes; `bash run_repro.sh` in the repo runs the full datasets.
+    n_ade_train = 600
+    n_ade_val = 200
+    n_in9_per_class = 60
     return n_ade_train, n_ade_val, n_in9_per_class
 
 
@@ -288,12 +290,12 @@ def _(ADESeg, DEV, F, DataLoader, NUM_ADE, ade_train, ade_val, dim_of, feats, no
 @app.cell
 def _(MODELS, mo, n_ade_train, n_ade_val, run_seg):
     mo.md("Running ADE20K linear segmentation for all encoders...")
-    seg = {m: run_seg(m, n_ade_train.value, n_ade_val.value) for m in MODELS}
+    seg = {m: run_seg(m, n_ade_train, n_ade_val) for m in MODELS}
     _seg_rows = "\n".join(f"| {m} | {seg[m]:.2f} |" for m in MODELS)
     mo.md(
         f"""
         **ADE20K linear mIoU** (frozen patch tokens, subset
-        {n_ade_train.value} train / {n_ade_val.value} val):
+        {n_ade_train} train / {n_ade_val} val):
 
         | Encoder | ADE20K mIoU |
         |---|---|
@@ -433,7 +435,7 @@ def _(DEV, F, IN9, DataLoader, cls_tf_for, feats, n_in9_per_class, nn, norm_for,
 @app.cell
 def _(MODELS, mo, n_in9_per_class, run_in9):
     mo.md("Running ImageNet-9 linear-probe robustness for all encoders...")
-    in9 = {m: run_in9(m, n_in9_per_class.value) for m in MODELS}
+    in9 = {m: run_in9(m, n_in9_per_class) for m in MODELS}
     _in9_rows = "\n".join(
         f"| {m} | {in9[m]['Original']:.2f} | {in9[m]['Mixed-Same']:.2f} | "
         f"{in9[m]['Mixed-Rand']:.2f} | {in9[m]['drop_ms']:.2f} | {in9[m]['drop_mr']:.2f} |"
@@ -441,7 +443,7 @@ def _(MODELS, mo, n_in9_per_class, run_in9):
     )
     mo.md(
         f"""
-        **ImageNet-9** (linear probe on frozen CLS, subset ~{n_in9_per_class.value}/class):
+        **ImageNet-9** (linear probe on frozen CLS, subset ~{n_in9_per_class}/class):
 
         | Encoder | Original | Mixed-Same | Mixed-Rand | drop MS | drop MR |
         |---|---|---|---|---|---|
