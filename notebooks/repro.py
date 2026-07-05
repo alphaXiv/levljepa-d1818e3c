@@ -177,10 +177,11 @@ def _(DEV, F, enc, np, senc, torch):
     def feats(name, images):
         """Return (cls [B,D], patches [B,196,D]) for a 224x224 batch."""
         if name == "levljepa":
-            f = enc.forward_features(images)
+            f = enc.forward_features(images)  # (B,197,D): CLS + 196 patches
             return f[:, 0].float(), f[:, 1:].float()
-        out = senc(pixel_values=images).last_hidden_state
-        return out[:, 0].float(), out[:, 1:].float()
+        # SigLIP has NO cls token: 196 patch tokens; global = mean.
+        out = senc(pixel_values=images).last_hidden_state  # (B,196,D)
+        return out.mean(dim=1).float(), out.float()
 
 
     def dim_of(name):
